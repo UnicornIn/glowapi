@@ -1,6 +1,3 @@
-# ── Solo backend: no subir el frontend ──────────────────────
-/Frontend/
-
 # ── Python ──────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
