@@ -1,0 +1,33 @@
+# ── Solo backend: no subir el frontend ──────────────────────
+/Frontend/
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ── Entornos virtuales ──────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Secretos / variables de entorno (NUNCA subir) ───────────
+.env
+.env.*
+*.pem
+*.key
+
+# ── Editor / SO ─────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Datos de migración y reportes con PII (NO subir) ────────
+Backend/app/migration/
+Backend/migration_output/
+Backend/output_batch_advanced_v2025/
+*.csv
+*.xlsx
+*.xls
