@@ -125,8 +125,11 @@ class FichaCreate(BaseModel):
     respuestas: Optional[List[Dict]] = []
     
     fotos_antes: Optional[List[str]] = []
+    fotos_durante: Optional[List[str]] = []
     fotos_despues: Optional[List[str]] = []
-    
+    # URLs previas por categoría dinámica, ej: {"lateral": ["https://..."]}
+    fotos_urls: Optional[Dict[str, List[str]]] = None
+
     autorizacion_publicacion: bool = False
     comentario_interno: Optional[str] = None
 

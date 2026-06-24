@@ -25,8 +25,6 @@ EMAIL_SENDER     = os.getenv("EMAIL_REMITENTE")
 EMAIL_PASSWORD   = os.getenv("EMAIL_CONTRASENA")
 SMTP_SERVER      = "smtp.gmail.com"
 SMTP_PORT        = 465
-LOGO_URL         = "https://s3.us-east-1.amazonaws.com/rf.images/companies/default/clients/RF+PNG.png"
-LOGO_ALTERNATIVO = "https://rizosfelicesdata.s3.us-east-2.amazonaws.com/logo+rosado+letra+blanca.png"
 
 # ─── PALETA (solo escala de grises) ──────────────────────────────────────────
 NEGRO       = "#000000"
@@ -205,15 +203,28 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
     from app.utils.branding import get_config
     _cfg = await get_config()
     nombre_negocio = _cfg.get("nombre_negocio", "GlowUp")
-    logo_negocio = _cfg.get("logo_url") or LOGO_URL
+    logo_negocio = _cfg.get("logo_url") or ""   # sin logo del cliente → se usa el título de texto (nunca una imagen de otra marca)
 
-    # ── PRE-CARGA PARALELA ───────────────────────────────────────────────────
-    fotos_antes   = ficha_data.get("fotos", {}).get("antes",   []) or []
-    fotos_despues = ficha_data.get("fotos", {}).get("despues", []) or []
+    # ── PRE-CARGA PARALELA (fotos por categoría dinámica) ─────────────────────
+    fotos_doc = ficha_data.get("fotos", {}) or {}
+    _cats = []
+    for _k in fotos_doc.keys():
+        _c = _k[:-5] if _k.endswith("_urls") else _k
+        if _c and _c not in _cats:
+            _cats.append(_c)
+    _orden = ["antes", "durante", "despues"]
+    _cats = [c for c in _orden if c in _cats] + [c for c in _cats if c not in _orden]
+
+    fotos_por_cat: dict[str, list] = {}
+    for cat in _cats:
+        urls = (fotos_doc.get(cat) or []) + (fotos_doc.get(f"{cat}_urls") or [])
+        if urls:
+            fotos_por_cat[cat] = urls[:4]
 
     urls_map: dict[str, str] = {"logo": logo_negocio}
-    for i, u in enumerate(fotos_antes[:4]):   urls_map[f"antes_{i}"]   = u
-    for i, u in enumerate(fotos_despues[:4]): urls_map[f"despues_{i}"] = u
+    for cat, urls in fotos_por_cat.items():
+        for i, u in enumerate(urls):
+            urls_map[f"{cat}_{i}"] = u
 
     print(f"🌐 Descargando {len(urls_map)} imágenes en paralelo…")
     keys = list(urls_map.keys())
@@ -275,6 +286,14 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
     tipo = ficha_data.get("tipo_ficha", "")
     de   = ficha_data.get("datos_especificos", {}) or {}
     resp = ficha_data.get("respuestas", []) or []
+
+    # Template del tipo (Fase 4 — render guiado por definición, si existe)
+    template_pdf = None
+    try:
+        from app.database.mongo import collection_ficha_templates
+        template_pdf = await collection_ficha_templates.find_one({"tipo_ficha": tipo})
+    except Exception:
+        template_pdf = None
 
     def bloque(titulo: str, valor):
         """Título en negrita + párrafo. Solo si hay contenido."""
@@ -410,7 +429,23 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
         story.append(Spacer(1, 3))
 
     # ══════════════════════════════════════════════════════════════════════
-    # TIPO DESCONOCIDO
+    # TIPO CON TEMPLATE (Fase 4) — render guiado por los campos definidos
+    # ══════════════════════════════════════════════════════════════════════
+    elif template_pdf and template_pdf.get("campos"):
+        story.append(Paragraph(str(template_pdf.get("label", tipo)).upper(), st["section"]))
+        selections = de.get("selections") if isinstance(de.get("selections"), dict) else {}
+        for campo in template_pdf["campos"]:
+            key = campo.get("key")
+            if not key:
+                continue
+            label = campo.get("label") or key.replace("_", " ").title()
+            val = de.get(key)
+            if val is None:
+                val = selections.get(key)
+            bloque(f"{label}:", val)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TIPO DESCONOCIDO (sin template) — volcado genérico
     # ══════════════════════════════════════════════════════════════════════
     else:
         if de:
@@ -462,7 +497,7 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
 
     # ── IMÁGENES ─────────────────────────────────────────────────────────────
     # 🔥 Sin PageBreak — las imágenes fluyen inmediatamente después del texto
-    if fotos_antes or fotos_despues:
+    if fotos_por_cat:
         story.append(Spacer(1, 8))
         story.append(_hr())
         story.append(Paragraph("IMÁGENES DEL SERVICIO", st["section"]))
@@ -510,10 +545,17 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
                 ]))
                 story.append(row)
 
-        render_fotos("ANTES DEL SERVICIO:",   "antes",   fotos_antes)
-        if fotos_antes and fotos_despues:
-            story.append(Spacer(1, 6))
-        render_fotos("DESPUÉS DEL SERVICIO:", "despues", fotos_despues)
+        _TITULOS_FOTO = {
+            "antes":   "ANTES DEL SERVICIO:",
+            "durante": "DURANTE EL SERVICIO:",
+            "despues": "DESPUÉS DEL SERVICIO:",
+        }
+        _primero = True
+        for cat, urls in fotos_por_cat.items():
+            if not _primero:
+                story.append(Spacer(1, 6))
+            render_fotos(_TITULOS_FOTO.get(cat, f"{cat.upper()}:"), cat, urls)
+            _primero = False
 
     # ── FOOTER ───────────────────────────────────────────────────────────────
     story.append(Spacer(1, 12))

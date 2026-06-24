@@ -43,5 +43,7 @@ collection_finance_movements = db["finance_movements"]
 collection_pre_bookings = db["pre_bookings"]  # Nueva colección para pre-reservas
 collection_inventory_reports = db["inventory_reports"]  # Nueva colección para reportes de inventario (entradas, salidas, ajustes)
 collection_business_config = db["business_config"]
+collection_ficha_templates = db["ficha_templates"]
+collection_credit_movements = db["credit_movements"]  # ledger de saldo a favor del cliente
 def connect_to_mongo():
     pass

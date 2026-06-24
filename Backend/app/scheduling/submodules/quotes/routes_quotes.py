@@ -1004,11 +1004,22 @@ async def crear_cita(
     nombres_concatenados = ", ".join(nombres_servicios)
 
     # Branding dinámico del negocio
-    from app.utils.branding import get_config
+    from app.utils.branding import get_config, color_acento, recomendaciones_items
     _cfg = await get_config()
     logo_url = _cfg.get("logo_url", "")
     nombre_negocio = _cfg.get("nombre_negocio", "GlowUp")
     footer_legal = _cfg.get("footer_legal", f"© {nombre_negocio}. Todos los derechos reservados.")
+    color = color_acento(_cfg)
+    _recos = recomendaciones_items(_cfg)
+    bloque_instrucciones = ""
+    if _recos:
+        _items = "".join(f"<li>{r}</li>" for r in _recos)
+        bloque_instrucciones = (
+            '<div class="instrucciones">'
+            '<div class="instrucciones-title"><span>📋 Recomendaciones importantes</span></div>'
+            f'<ul class="instrucciones-list">{_items}</ul>'
+            '</div>'
+        )
 
     mensaje_html = f"""
     <!DOCTYPE html>
@@ -1031,7 +1042,7 @@ async def crear_cita(
                 border-radius: 15px;
                 overflow: hidden;
                 box-shadow: 0 4px 10px rgba(0,0,0,0.1);
-                border: 1px solid #f198c0;
+                border: 1px solid {color};
             }}
             .email-header {{
                 background-color: #000000; /* Fondo Negro */
@@ -1044,7 +1055,7 @@ async def crear_cita(
                 margin-bottom: 20px;
             }}
             .header-title {{
-                color: #f198c0; /* Rosa solicitado */
+                color: #ffffff;
                 margin: 0;
                 font-size: 28px;
                 text-transform: uppercase;
@@ -1064,7 +1075,7 @@ async def crear_cita(
                 font-weight: bold;
                 margin-bottom: 20px;
                 padding-bottom: 10px;
-                border-bottom: 2px solid #f198c0; /* Borde rosa */
+                border-bottom: 2px solid {color}; /* Borde rosa */
             }}
             .info-grid {{
                 display: grid;
@@ -1076,10 +1087,10 @@ async def crear_cita(
                 background-color: #fff;
                 padding: 15px;
                 border-radius: 10px;
-                border: 1px solid #f198c0; /* Bordes rosa */
+                border: 1px solid {color}; /* Bordes rosa */
             }}
             .info-label {{
-                color: #f198c0; /* Texto rosa */
+                color: {color}; /* Texto rosa */
                 font-size: 12px;
                 text-transform: uppercase;
                 font-weight: bold;
@@ -1091,13 +1102,13 @@ async def crear_cita(
                 font-weight: 600;
             }}
             .instrucciones {{
-                background-color: #fff0f6; /* Fondo rosado muy clarito */
+                background-color: #f7f7f7;
                 padding: 20px;
                 border-radius: 12px;
-                border-left: 5px solid #f198c0;
+                border-left: 5px solid {color};
             }}
             .instrucciones-title {{
-                color: #f198c0;
+                color: {color};
                 font-weight: bold;
                 margin-bottom: 10px;
             }}
@@ -1118,7 +1129,7 @@ async def crear_cita(
                 font-size: 13px;
             }}
             .footer-links a {{
-                color: #f198c0;
+                color: {color};
                 text-decoration: none;
                 margin: 0 10px;
             }}
@@ -1129,7 +1140,7 @@ async def crear_cita(
                 display: inline-block;
                 width: 30px;
                 height: 30px;
-                background: #f198c0;
+                background: {color};
                 color: white;
                 border-radius: 50%;
                 line-height: 30px;
@@ -1187,22 +1198,11 @@ async def crear_cita(
                     </div>
                 </div>
             
-                <div class="instrucciones">
-                    <div class="instrucciones-title">
-                        <span>📋 Recomendaciones importantes</span>
-                    </div>
-                    <ul class="instrucciones-list">
-                        <li>Llega 10 minutos antes de tu cita</li>
-                        <li>En caso de servicio completo, traer cabello desenredado</li>
-                        <li>Notifica cualquier cancelación con al menos 24 horas de anticipación</li>
-                        <li>Consulta nuestras políticas en nuestro sitio web</li>
-                        <li>En caso de corte de cabello, traer el cabello limpio y desenredado</li>
-                    </ul>
-                </div>
-            
-                <div style="margin-top: 30px; padding: 20px; background: #fff; border-radius: 12px; border: 1px solid #f198c0;">
+                {bloque_instrucciones}
+
+                <div style="margin-top: 30px; padding: 20px; background: #fff; border-radius: 12px; border: 1px solid {color};">
                     <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                        <span style="font-size: 16px; font-weight: 600; color: #f198c0;">📞 ¿Necesitas ayuda?</span>
+                        <span style="font-size: 16px; font-weight: 600; color: {color};">📞 ¿Necesitas ayuda?</span>
                     </div>
                     <p style="color: #333; margin-bottom: 5px;">
                         <strong>{sede.get('nombre')}:</strong> {sede.get('telefono', 'No disponible')}
@@ -1887,7 +1887,48 @@ async def cancelar_cita(cita_id: str, current_user: dict = Depends(get_current_u
         except Exception as e:
             print(f"⚠️ Error liberando giftcard al cancelar: {e}")
 
-    return {"success": True, "mensaje": "Cita cancelada", "cita_id": cita_id}
+    # ═══════════════════════════════════════════════
+    # ⭐ ABONO → SALDO A FAVOR DEL CLIENTE
+    # El abono pagado en efectivo/transferencia (todo lo que NO fue giftcard,
+    # que ya se libera arriba) se traslada como crédito del cliente para su
+    # próxima cita. Self-service: no requiere soporte.
+    # ═══════════════════════════════════════════════
+    saldo_acreditado = 0.0
+    try:
+        if not cita.get("abono_trasladado"):
+            abono_total = round(float(cita.get("abono", 0) or 0), 2)
+            historial_pagos = cita.get("historial_pagos", []) or []
+            monto_giftcard = round(sum(
+                float(p.get("monto", 0) or 0)
+                for p in historial_pagos if p.get("metodo") == "giftcard"
+            ), 2)
+            credito = round(abono_total - monto_giftcard, 2)
+            cliente_id_cita = cita.get("cliente_id")
+            if credito > 0 and cliente_id_cita:
+                from app.clients_service.credito import acreditar_saldo
+                nuevo = await acreditar_saldo(
+                    cliente_id_cita, credito,
+                    tipo="abono_cancelacion",
+                    registrado_por=current_user.get("email"),
+                    cita_id=str(cita["_id"]),
+                    notas="Traslado automático de abono por cancelación de cita",
+                )
+                if nuevo is not None:
+                    saldo_acreditado = credito
+                    await collection_citas.update_one(
+                        {"_id": ObjectId(cita["_id"])},
+                        {"$set": {"abono_trasladado": True, "abono_trasladado_a": "saldo_a_favor"}}
+                    )
+                    print(f"💳 Abono {credito} trasladado a saldo a favor de {cliente_id_cita}")
+    except Exception as e:
+        print(f"⚠️ Error trasladando abono a saldo a favor: {e}")
+
+    return {
+        "success": True,
+        "mensaje": "Cita cancelada",
+        "cita_id": cita_id,
+        "saldo_a_favor_acreditado": saldo_acreditado,
+    }
 
 # =============================================================
 # 🔹 CONFIRMAR CITA
@@ -2042,18 +2083,18 @@ async def reenviar_correo_cita(
 
     cfg = configs[tipo]
 
-    # ─── Bloque de instrucciones (solo si aplica) ───────────────────────
+    # ─── Bloque de instrucciones (recomendaciones configurables) ────────
+    from app.utils.branding import get_config as _gc, color_acento as _ca, recomendaciones_items as _ri
+    _cfg_brand = await _gc()
+    _color = _ca(_cfg_brand)
     bloque_instrucciones = ""
-    if cfg["instrucciones"]:
-        bloque_instrucciones = """
-        <div style="background-color:#fff0f6;padding:20px;border-radius:12px;border-left:5px solid #f198c0;margin-top:20px;">
-            <div style="color:#f198c0;font-weight:bold;margin-bottom:10px;">📋 Recomendaciones importantes</div>
-            <ul style="margin:0;padding-left:20px;color:#555;font-size:14px;">
-                <li style="margin-bottom:8px;">Llega 10 minutos antes de tu cita</li>
-                <li style="margin-bottom:8px;">En caso de servicio completo, traer cabello desenredado</li>
-                <li style="margin-bottom:8px;">Notifica cualquier cancelación con al menos 24 horas de anticipación</li>
-                <li style="margin-bottom:8px;">En caso de corte de cabello, traer el cabello limpio y desenredado</li>
-            </ul>
+    _recos = _ri(_cfg_brand) if cfg["instrucciones"] else []
+    if _recos:
+        _items = "".join(f'<li style="margin-bottom:8px;">{r}</li>' for r in _recos)
+        bloque_instrucciones = f"""
+        <div style="background-color:#f7f7f7;padding:20px;border-radius:12px;border-left:5px solid {_color};margin-top:20px;">
+            <div style="color:{_color};font-weight:bold;margin-bottom:10px;">📋 Recomendaciones importantes</div>
+            <ul style="margin:0;padding-left:20px;color:#555;font-size:14px;">{_items}</ul>
         </div>
         """
 
@@ -2071,11 +2112,12 @@ async def reenviar_correo_cita(
         """
 
     # ─── Branding dinámico del negocio ──────────────────────────────────
-    from app.utils.branding import get_config
+    from app.utils.branding import get_config, color_acento
     _cfg = await get_config()
     logo_url = _cfg.get("logo_url", "")
     nombre_negocio = _cfg.get("nombre_negocio", "GlowUp")
     footer_legal = _cfg.get("footer_legal", f"© {nombre_negocio}. Todos los derechos reservados.")
+    color = color_acento(_cfg)
 
     # ─── HTML del correo ────────────────────────────────────────────────
     mensaje_html = f"""
@@ -2086,12 +2128,12 @@ async def reenviar_correo_cita(
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
     </head>
     <body style="font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background-color:#f4f4f4;margin:0;padding:0;">
-        <div style="max-width:600px;margin:20px auto;background-color:#ffffff;border-radius:15px;overflow:hidden;box-shadow:0 4px 10px rgba(0,0,0,0.1);border:1px solid #f198c0;">
+        <div style="max-width:600px;margin:20px auto;background-color:#ffffff;border-radius:15px;overflow:hidden;box-shadow:0 4px 10px rgba(0,0,0,0.1);border:1px solid {color};">
 
             <div style="background-color:#000000;color:#ffffff;padding:40px 20px;text-align:center;">
                 <img src="{logo_url}"
                      alt="{nombre_negocio}" style="max-width:180px;margin-bottom:20px;">
-                <h1 style="color:#f198c0;margin:0;font-size:28px;text-transform:uppercase;letter-spacing:2px;">
+                <h1 style="color:#ffffff;margin:0;font-size:28px;text-transform:uppercase;letter-spacing:2px;">
                     {cfg['titulo']}
                 </h1>
                 <p style="margin:10px 0 0;font-size:16px;opacity:0.9;">{cfg['subtitulo']}</p>
@@ -2099,34 +2141,34 @@ async def reenviar_correo_cita(
 
             <div style="padding:30px;">
                 <div style="color:#333;font-size:18px;font-weight:bold;margin-bottom:20px;
-                            padding-bottom:10px;border-bottom:2px solid #f198c0;">
+                            padding-bottom:10px;border-bottom:2px solid {color};">
                     📅 Detalles de la cita
                 </div>
 
                 <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:15px;margin-bottom:20px;">
-                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid #f198c0;">
-                        <div style="color:#f198c0;font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Cliente</div>
+                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid {color};">
+                        <div style="color:{color};font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Cliente</div>
                         <div style="color:#333;font-size:15px;font-weight:600;">{cliente_nombre}</div>
                     </div>
-                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid #f198c0;">
-                        <div style="color:#f198c0;font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Servicio(s)</div>
+                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid {color};">
+                        <div style="color:{color};font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Servicio(s)</div>
                         <div style="color:#333;font-size:15px;font-weight:600;">{nombres_servicios}</div>
                     </div>
-                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid #f198c0;">
-                        <div style="color:#f198c0;font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Profesional</div>
+                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid {color};">
+                        <div style="color:{color};font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Profesional</div>
                         <div style="color:#333;font-size:15px;font-weight:600;">{profesional_nombre}</div>
                     </div>
-                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid #f198c0;">
-                        <div style="color:#f198c0;font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Sede</div>
+                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid {color};">
+                        <div style="color:{color};font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Sede</div>
                         <div style="color:#333;font-size:15px;font-weight:600;">{sede_nombre}</div>
                         <small style="color:#888;">{sede_direccion}</small>
                     </div>
-                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid #f198c0;">
-                        <div style="color:#f198c0;font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Fecha</div>
+                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid {color};">
+                        <div style="color:{color};font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Fecha</div>
                         <div style="color:#333;font-size:15px;font-weight:600;">{fecha_str}</div>
                     </div>
-                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid #f198c0;">
-                        <div style="color:#f198c0;font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Horario</div>
+                    <div style="background:#fff;padding:15px;border-radius:10px;border:1px solid {color};">
+                        <div style="color:{color};font-size:12px;text-transform:uppercase;font-weight:bold;margin-bottom:5px;">Horario</div>
                         <div style="color:#333;font-size:15px;font-weight:600;">{hora_inicio} - {hora_fin}</div>
                     </div>
                 </div>
@@ -2134,8 +2176,8 @@ async def reenviar_correo_cita(
                 {bloque_instrucciones}
                 {bloque_cancelacion}
 
-                <div style="margin-top:20px;padding:20px;background:#fff;border-radius:12px;border:1px solid #f198c0;">
-                    <div style="font-size:16px;font-weight:600;color:#f198c0;margin-bottom:8px;">📞 ¿Necesitas ayuda?</div>
+                <div style="margin-top:20px;padding:20px;background:#fff;border-radius:12px;border:1px solid {color};">
+                    <div style="font-size:16px;font-weight:600;color:{color};margin-bottom:8px;">📞 ¿Necesitas ayuda?</div>
                     <p style="color:#333;margin-bottom:5px;"><strong>{sede_nombre}:</strong> {sede_telefono}</p>
                 </div>
             </div>
@@ -2302,6 +2344,19 @@ async def registrar_pago(
         codigo_giftcard_usado = codigo_gc
         print(f"🎁 Giftcard {codigo_gc}: reservados {fmt(monto_real, moneda)}")
     # ══ fin giftcard ══
+
+    # ══ SALDO A FAVOR DEL CLIENTE ══
+    if data.metodo_pago == "saldo_a_favor":
+        from app.clients_service.credito import consumir_saldo
+        consumido = await consumir_saldo(
+            cita.get("cliente_id"), monto_solicitado,
+            tipo="uso_cita", registrado_por=current_user.get("email"),
+            cita_id=cita_id, notas="Pago de cita con saldo a favor",
+        )
+        if consumido <= 0:
+            raise HTTPException(status_code=400, detail="El cliente no tiene saldo a favor disponible")
+        monto_real = consumido   # consumo parcial permitido; el resto queda pendiente
+    # ══ fin saldo a favor ══
 
     nuevo_saldo_pendiente = round(saldo_pendiente_actual - monto_real, 2)
     nuevo_abono = round(float(cita.get("abono", 0) or 0) + monto_real, 2)

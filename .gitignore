@@ -1,5 +1,5 @@
 # ── Solo backend: no subir el frontend ──────────────────────
-/Frontend/
+
 
 # ── Python ──────────────────────────────────────────────────
 __pycache__/
@@ -15,6 +15,7 @@ env/
 # ── Secretos / variables de entorno (NUNCA subir) ───────────
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 

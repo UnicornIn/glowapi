@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Form, Request
 from datetime import datetime, time, timedelta
 from app.scheduling.models import FichaCreate, ServicioEnFicha
 from app.scheduling.submodules.quotes.controllers import generar_pdf_ficha, crear_html_correo_ficha, enviar_correo_con_pdf
@@ -19,7 +19,8 @@ from app.database.mongo import (
     collection_estilista,
     collection_locales,
     collection_clients,
-    collection_card
+    collection_card,
+    collection_ficha_templates
 )
 
 router = APIRouter(tags=["Fichas"])
@@ -152,6 +153,61 @@ Foto entra
             ├── Intento 2: pillow_heif.read_heif() → cubre Samsung msf1/mif1
             │
             └── ¿Ambos fallan? → HTTP 400 (nunca sube basura a S3)'''
+
+
+def _normalizar_fotos(fotos_doc: dict) -> dict:
+    """
+    Normaliza el bloque de fotos de una ficha a {categoria: [urls]}.
+    Soporta categorías dinámicas: combina las fotos subidas a S3 ('<cat>') con
+    las URLs previas ('<cat>_urls'). Siempre incluye antes/durante/despues por
+    retrocompatibilidad, más cualquier categoría extra que tenga la ficha.
+    """
+    fotos_doc = fotos_doc or {}
+
+    # Descubrir categorías presentes (clave sin sufijo _urls)
+    categorias = []
+    for k in fotos_doc.keys():
+        cat = k[:-5] if k.endswith("_urls") else k
+        if cat and cat not in categorias:
+            categorias.append(cat)
+    for c in ("antes", "durante", "despues"):
+        if c not in categorias:
+            categorias.append(c)
+
+    def _merge(cat: str) -> list:
+        return (fotos_doc.get(cat) or []) + (fotos_doc.get(f"{cat}_urls") or [])
+
+    return {cat: _merge(cat) for cat in categorias}
+
+
+def _validar_datos_ficha(template: dict, datos_especificos: dict) -> list:
+    """
+    Valida datos_especificos contra los campos del template (Fase 3).
+    Solo se invoca si el template tiene estricto=True. Devuelve lista de errores
+    (vacía = OK). Busca cada campo en el nivel superior o dentro de 'selections'.
+    """
+    errores = []
+    de = datos_especificos or {}
+    selections = de.get("selections") if isinstance(de.get("selections"), dict) else {}
+
+    def _valor(key):
+        if key in de:
+            return de.get(key)
+        return selections.get(key)
+
+    for campo in template.get("campos", []):
+        key = campo.get("key")
+        if not key:
+            continue
+        val = _valor(key)
+        if campo.get("requerido") and (val is None or str(val).strip() == ""):
+            errores.append(f"Falta el campo requerido '{key}'")
+            continue
+        opciones = campo.get("opciones")
+        if opciones and val not in (None, "") and val not in opciones:
+            errores.append(f"'{key}'='{val}' no está en las opciones permitidas {opciones}")
+    return errores
+
 
 # =============================================================
 # 🔹 OBTENER FICHAS POR CLIENTE (con filtros inteligentes)
@@ -300,6 +356,8 @@ async def obtener_fichas_por_cliente(
             "estado": ficha.get("estado"),
             "estado_pago": ficha.get("estado_pago"),
             "contenido": datos_especificos,
+            # ⭐ Fotos normalizadas: combina las subidas a S3 con las URLs previas
+            "fotos": _normalizar_fotos(ficha.get("fotos", {})),
         }
 
         # Enriquecimiento de profesional y sede
@@ -337,9 +395,8 @@ def parse_ficha(data: str = Form(...)):
 # ============================================================
 @router.post("/create-ficha", response_model=dict)
 async def crear_ficha(
+    request: Request,
     data: FichaCreate = Depends(parse_ficha),
-    fotos_antes: Optional[List[UploadFile]] = File(None),
-    fotos_despues: Optional[List[UploadFile]] = File(None),
     current_user: dict = Depends(get_current_user)
 ):
     print("📝 Data recibida:", data.dict())
@@ -408,25 +465,53 @@ async def crear_ficha(
         raise HTTPException(404, "Sede no encontrada")
 
     # ------------------------------
-    # SUBIR FOTOS
+    # VALIDACIÓN CONTRA TEMPLATE (Fase 3 — solo si estricto=True)
     # ------------------------------
-    urls_antes = []
-    if fotos_antes:
-        for foto in fotos_antes:
-            url = upload_to_s3(
-                foto,
-                f"companies/{sede.get('company_id','default')}/clients/{data.cliente_id}/fichas/{data.tipo_ficha}/antes"
-            )
-            urls_antes.append(url)
+    template = await collection_ficha_templates.find_one({"tipo_ficha": data.tipo_ficha})
+    if template and template.get("estricto"):
+        errores = _validar_datos_ficha(template, data.datos_especificos)
+        if errores:
+            raise HTTPException(422, detail={"mensaje": "Validación de ficha falló", "errores": errores})
 
-    urls_despues = []
-    if fotos_despues:
-        for foto in fotos_despues:
+    # ------------------------------
+    # SUBIR FOTOS — categorías dinámicas (Fase 2)
+    # Cualquier campo del FormData llamado 'fotos_<categoria>' se sube bajo esa
+    # categoría. Soporta antes/durante/despues y cualquier categoría nueva del
+    # template sin tocar código.
+    # ------------------------------
+    company_id = sede.get("company_id", "default")
+    form = await request.form()
+    fotos_doc: dict = {}
+    hubo_subida = False
+
+    for field_name in form.keys():
+        if not field_name.startswith("fotos_"):
+            continue
+        categoria = field_name[len("fotos_"):]
+        archivos = [f for f in form.getlist(field_name) if hasattr(f, "filename") and getattr(f, "filename", None)]
+        if not archivos:
+            continue
+        urls_cat = []
+        for foto in archivos:
             url = upload_to_s3(
                 foto,
-                f"companies/{sede.get('company_id','default')}/clients/{data.cliente_id}/fichas/{data.tipo_ficha}/despues"
+                f"companies/{company_id}/clients/{data.cliente_id}/fichas/{data.tipo_ficha}/{categoria}"
             )
-            urls_despues.append(url)
+            urls_cat.append(url)
+        if urls_cat:
+            fotos_doc[categoria] = urls_cat
+            hubo_subida = True
+
+    # URLs previas: legacy (antes/durante/despues) + genéricas por categoría
+    for cat, urls_prev in (
+        ("antes", data.fotos_antes), ("durante", data.fotos_durante), ("despues", data.fotos_despues)
+    ):
+        if urls_prev:
+            fotos_doc[f"{cat}_urls"] = urls_prev
+    if data.fotos_urls:
+        for cat, urls_prev in data.fotos_urls.items():
+            if urls_prev:
+                fotos_doc[f"{cat}_urls"] = urls_prev
 
     # ------------------------------
     # FIX RESPUESTAS
@@ -472,12 +557,7 @@ async def crear_ficha(
         "descripcion_servicio": data.descripcion_servicio,
         "respuestas": respuestas_final,
 
-        "fotos": {
-            "antes": urls_antes,
-            "despues": urls_despues,
-            "antes_urls": data.fotos_antes,
-            "despues_urls": data.fotos_despues
-        },
+        "fotos": fotos_doc,
 
         "autorizacion_publicacion": data.autorizacion_publicacion,
         "comentario_interno": data.comentario_interno,
@@ -486,7 +566,7 @@ async def crear_ficha(
         "created_by": current_user.get("email"),
         "user_id": current_user.get("user_id"),
 
-        "procesado_imagenes": bool(urls_antes or urls_despues),
+        "procesado_imagenes": hubo_subida,
         "origen": "manual"
     }
 
@@ -507,9 +587,8 @@ async def crear_ficha(
 @router.put("/fichas/{ficha_id}", response_model=dict)
 async def editar_ficha(
     ficha_id: str,
+    request: Request,
     data: str = Form(...),
-    fotos_antes: Optional[List[UploadFile]] = File(None),
-    fotos_despues: Optional[List[UploadFile]] = File(None),
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -612,46 +691,39 @@ async def editar_ficha(
             update_doc[campo] = cambios[campo]
 
     # ------------------------------
-    # FOTOS — siempre reemplazan, nunca acumulan
-    # Solo se toca el lado (antes/despues) que se envía
+    # FOTOS — categorías dinámicas; cada 'fotos_<cat>' enviada reemplaza esa
+    # categoría. Las categorías no enviadas se conservan tal cual.
     # ------------------------------
-    if fotos_antes or fotos_despues:
+    form = await request.form()
+    fotos_subidas = {}
+    for field_name in form.keys():
+        if not field_name.startswith("fotos_"):
+            continue
+        categoria = field_name[len("fotos_"):]
+        archivos = [f for f in form.getlist(field_name) if hasattr(f, "filename") and getattr(f, "filename", None)]
+        if archivos:
+            fotos_subidas[categoria] = archivos
+
+    if fotos_subidas:
         sede       = await collection_locales.find_one({"sede_id": ficha.get("sede_id")})
         company_id = sede.get("company_id", "default") if sede else "default"
         cliente_id = ficha.get("cliente_id")
         tipo_ficha = cambios.get("tipo_ficha", ficha.get("tipo_ficha", "general"))
 
-        fotos_actuales = ficha.get("fotos", {
-            "antes": [], "despues": [], "antes_urls": [], "despues_urls": []
-        })
+        # Partir de las fotos actuales para no perder categorías no enviadas
+        nuevas_fotos = dict(ficha.get("fotos", {}) or {})
 
-        nuevas_antes   = fotos_actuales.get("antes", [])   # default: mantener las actuales
-        nuevas_despues = fotos_actuales.get("despues", []) # default: mantener las actuales
-
-        if fotos_antes:
-            nuevas_antes = []  # ← reemplaza, no suma
-            for foto in fotos_antes:
+        for categoria, archivos in fotos_subidas.items():
+            urls_cat = []
+            for foto in archivos:
                 url = upload_to_s3(
                     foto,
-                    f"companies/{company_id}/clients/{cliente_id}/fichas/{tipo_ficha}/antes"
+                    f"companies/{company_id}/clients/{cliente_id}/fichas/{tipo_ficha}/{categoria}"
                 )
-                nuevas_antes.append(url)
+                urls_cat.append(url)
+            nuevas_fotos[categoria] = urls_cat   # ← reemplaza esa categoría, no suma
 
-        if fotos_despues:
-            nuevas_despues = []  # ← reemplaza, no suma
-            for foto in fotos_despues:
-                url = upload_to_s3(
-                    foto,
-                    f"companies/{company_id}/clients/{cliente_id}/fichas/{tipo_ficha}/despues"
-                )
-                nuevas_despues.append(url)
-
-        update_doc["fotos"] = {
-            "antes":       nuevas_antes,
-            "despues":     nuevas_despues,
-            "antes_urls":  fotos_actuales.get("antes_urls", []),
-            "despues_urls": fotos_actuales.get("despues_urls", [])
-        }
+        update_doc["fotos"] = nuevas_fotos
 
     # ------------------------------
     # VALIDAR QUE HAY ALGO QUE EDITAR

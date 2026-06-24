@@ -13,7 +13,7 @@ import uuid
 import boto3
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from app.database.mongo import collection_business_config, collection_locales
 from app.auth.routes import get_current_user
 from app.utils.branding import invalidar_cache
@@ -40,6 +40,7 @@ class BusinessConfig(BaseModel):
     color_primario: Optional[str] = "#000000"
     email_remitente: Optional[str] = None
     footer_legal: Optional[str] = None
+    email_recomendaciones: Optional[List[str]] = None   # tips en los correos al cliente
     ws_url: Optional[str] = None          # solo clientes con mensajería (WebSocket)
 
 
@@ -51,6 +52,7 @@ class BusinessConfigPatch(BaseModel):
     color_primario: Optional[str] = None
     email_remitente: Optional[str] = None
     footer_legal: Optional[str] = None
+    email_recomendaciones: Optional[List[str]] = None
     ws_url: Optional[str] = None
 
 
