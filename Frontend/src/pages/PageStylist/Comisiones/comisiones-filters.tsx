@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Select, SelectContent, SelectItem } from "../../../components/ui/select"
 import { Calendar } from "lucide-react";
 import { formatSedeNombre } from "../../../lib/sede";
+import { features } from "../../../config/features";
 
 // Interfaces para los datos
 interface Estilista {
@@ -89,7 +90,7 @@ export function ComisionesFilters() {
           onValueChange={setSedeSeleccionada}
         >
           <SelectContent>
-            <SelectItem value="todas">Todas las sedes</SelectItem>
+            {features.multiSede && <SelectItem value="todas">Todas las sedes</SelectItem>}
               {sedes.length > 0 ? (
                 sedes.map((sede) => (
                   <SelectItem key={sede.id} value={sede.id}>

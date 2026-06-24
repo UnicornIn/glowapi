@@ -5,6 +5,7 @@ import type { Cliente } from "../../../types/cliente"
 import type { Sede } from "../Sedes/sedeService"
 import type { ClientesPaginadosMetadata } from "./clientesService"
 import { formatSedeNombre } from "../../../lib/sede"
+import { features } from "../../../config/features"
 
 export type FilterType = 'Todos' | 'Activos' | 'En riesgo' | 'Perdidos' | 'Nuevos'
 
@@ -97,7 +98,7 @@ function ClientsListComponent({
       <div className="glw-page-header">
         <div>
           <h1>Clientes</h1>
-          <p>Base de datos · Todas las sedes</p>
+          <p>Base de datos{features.multiSede ? " · Todas las sedes" : ""}</p>
         </div>
         <button className="glw-btn glw-btn-primary" onClick={onAddClient}>+ Nuevo cliente</button>
       </div>
@@ -134,7 +135,7 @@ function ClientsListComponent({
         <div className="glw-filter-sep" />
 
         {/* Sede selector */}
-        {sedes.length > 0 && (
+        {features.multiSede && sedes.length > 1 && (
           <select
             className={`glw-filter-select ${selectedSede !== 'all' ? 'active-filter' : ''}`}
             value={selectedSede}

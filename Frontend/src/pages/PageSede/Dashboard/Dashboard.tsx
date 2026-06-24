@@ -9,6 +9,7 @@ import { getSedes, getVentasAvailablePeriods, type Sede } from "./analyticsApi";
 import { normalizeCurrencyCode, getStoredCurrency } from "../../../lib/currency";
 import { RefreshCw, AlertCircle } from "lucide-react";
 import { SedeDropdown } from "../../../components/ui/SedeDropdown";
+import { features } from "../../../config/features";
 import { Alert, AlertTitle, AlertDescription } from "../../../components/ui/alert";
 
 import { DashboardSedeView } from "./DashboardSedeView";
@@ -134,7 +135,7 @@ export default function DashboardPage() {
         (sede) => sede.sede_id === preferredSedeId
       );
 
-      if (filteredSedes.length > 1) {
+      if (features.multiSede && filteredSedes.length > 1) {
         setSelectedSede((current) => {
           if (current === "global") return "global";
           if (current && filteredSedes.some((s) => s.sede_id === current))
@@ -251,7 +252,7 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="flex gap-2 items-center">
-              {sedes.length > 1 && (
+              {features.multiSede && sedes.length > 1 && (
                 <SedeDropdown
                   value={selectedSede}
                   onChange={handleSedeChange}

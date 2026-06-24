@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import { AlertTriangle, Loader2, AlertCircle, Globe, Check, Building2, ChevronLeft, ChevronRight, Pencil, Plus, Search, SlidersHorizontal } from "lucide-react"
 import { SedeDropdown } from "../../../components/ui/SedeDropdown"
+import { features } from "../../../config/features"
 import { Button } from "../../../components/ui/button"
 import { Input } from "../../../components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../../components/ui/select"
@@ -1124,6 +1125,7 @@ export function ProductsList() {
           </nav>
 
           {/* Sede selector — Vista Global style */}
+          {features.multiSede && sedesDisponibles.length > 1 && (
           <SedeDropdown
             value={selectedDashboardSede}
             onChange={(sedeId) => {
@@ -1138,6 +1140,7 @@ export function ProductsList() {
             align="right"
             className="mb-1.5"
           />
+          )}
         </div>
 
         {activeProductsTab !== "lista" ? (

@@ -13,6 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { Sidebar } from "../../components/Layout/Sidebar";
+import { features } from "../../config/features";
 import { confirmAction } from '../../components/ui/confirm-dialog';
 import { PageHeader } from "../../components/Layout/PageHeader";
 import { Button } from "../../components/ui/button";
@@ -968,8 +969,8 @@ export function StylistsTeamWorkspace({
     return sedes.filter((sede) => allowedSet.has(String(sede.sede_id ?? "").trim()));
   }, [allowedSedeIds, isSuperAdmin, sedes]);
 
-  const canSelectAllSedes = visibleSedes.length > 1;
-  const shouldShowSedeDropdown = visibleSedes.length > 1;
+  const canSelectAllSedes = features.multiSede && visibleSedes.length > 1;
+  const shouldShowSedeDropdown = features.multiSede && visibleSedes.length > 1;
   const isAllSedesSelected = selectedSedeId === ALL_SEDES_VALUE;
 
   const selectedSedeIds = useMemo(() => {

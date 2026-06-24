@@ -37,6 +37,11 @@ export const installApiFetchInterceptor = () => {
       init?.headers ?? (input instanceof Request ? input.headers : undefined)
     );
 
+    // ngrok free tier devuelve un interstitial HTML si no se envía este header.
+    if (!headers.has("ngrok-skip-browser-warning")) {
+      headers.set("ngrok-skip-browser-warning", "true");
+    }
+
     if (shouldAttachSedeHeader(headers)) {
       const activeSedeId = getActiveSedeIdFromStorage();
       if (activeSedeId && !headers.has("X-Sede-Id") && !headers.has("x-sede-id")) {

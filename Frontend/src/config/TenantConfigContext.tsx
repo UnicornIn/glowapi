@@ -60,8 +60,6 @@ export const TenantConfigProvider = ({ children }: TenantConfigProviderProps) =>
           isLoading: false,
           brand: {
             ...prev.brand,
-            appName: data.nombre_negocio || prev.brand.appName,
-            companyName: data.razon_social || prev.brand.companyName,
             logoUrl: data.logo_url || prev.brand.logoUrl,
             footerLegal: data.footer_legal || prev.brand.footerLegal,
             wsUrl: data.ws_url || prev.brand.wsUrl,

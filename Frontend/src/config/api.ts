@@ -6,7 +6,7 @@ function resolveApiBaseUrl(): string {
   }
 
   // Producción: spa-aurora.glowup.com → https://api-spa-aurora.glowup.com/
-  return `https://api-${hostname}/`;
+  return `https://uncover-ferment-deskbound.ngrok-free.dev/`;
 }
 
 export const API_BASE_URL = resolveApiBaseUrl();

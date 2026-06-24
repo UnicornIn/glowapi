@@ -7,6 +7,7 @@ import { Skeleton } from "../../components/ui/skeleton";
 import { Badge } from "../../components/ui/badge";
 import { Button as UiButton } from "../../components/ui/button";
 import { Pencil } from "lucide-react";
+import { features } from "../../config/features";
 import {
   Table,
   TableBody,
@@ -105,7 +106,7 @@ export function ProductsHeaderFilters({
               <SelectValue placeholder="Selecciona una sede" />
             </SelectTrigger>
             <SelectContent className="bg-white border border-gray-200 text-gray-900">
-              {enableAllSedesOption && sedes.length > 1 && (
+              {features.multiSede && enableAllSedesOption && sedes.length > 1 && (
                 <SelectItem value="all">Todas las sedes</SelectItem>
               )}
               {sedes.map((sede) => (

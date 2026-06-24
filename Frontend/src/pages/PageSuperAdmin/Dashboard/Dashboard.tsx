@@ -10,6 +10,7 @@ import { getSedes, getAvailablePeriods, type Sede } from "./Api/analyticsApi";
 import { getStoredCurrency, normalizeCurrencyCode } from "../../../lib/currency";
 import { RefreshCw, Building2, AlertCircle } from "lucide-react";
 import { SedeDropdown } from "../../../components/ui/SedeDropdown";
+import { features } from "../../../config/features";
 import { Badge } from "../../../components/ui/badge";
 import { PeriodoSelector, type PeriodoId } from "../../../components/ui/PeriodoSelector";
 import { Alert, AlertTitle, AlertDescription } from "../../../components/ui/alert";
@@ -173,6 +174,7 @@ export default function DashboardPage() {
               </div>
             </div>
             <div className="flex gap-2 items-center">
+              {features.multiSede && sedes.length > 1 && (
               <SedeDropdown
                 value={selectedSede}
                 onChange={handleSedeChange}
@@ -183,6 +185,7 @@ export default function DashboardPage() {
                 size="sm"
                 align="right"
               />
+              )}
               <button
                 onClick={handleRefresh}
                 className="inline-flex items-center gap-1.5 px-3.5 py-[7px] border border-[#e8e8e6] rounded-[5px] text-[12.5px] font-medium text-[#6b6b68] bg-white hover:bg-[#f7f7f6] hover:text-[#0a0a0a] transition-all"

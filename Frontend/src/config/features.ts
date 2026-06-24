@@ -5,7 +5,7 @@ export const features = {
   fichasTecnicas: true,
   crm: true,
   finanzas: true,
-  multiSede: true,
+  multiSede: false,
   cierreCaja: true,
 };
 

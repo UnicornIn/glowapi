@@ -11,6 +11,7 @@ import { FichaAsesoriaCorte } from './fichas/FichaAsesoriaCorte'
 import { FichaCuidadoPostColor } from './fichas/FichaCuidadoPostColor'
 import { FichaValoracionPruebaColor } from './fichas/FichaValoracionPruebaColor'
 import { FichaOzonoterapiaCapilar } from './fichas/FichaOzonoterapiaCapilar'
+import { FichaEstilizado } from './fichas/FichaEstilizado'
 import { API_BASE_URL } from '../../../types/config'
 // import { getFichaAuthToken } from './fichas/fichaHelpers'
 // Añadir al inicio del archivo, junto con los otros imports
@@ -38,7 +39,8 @@ type TipoFicha =
   | "ASESORIA_CORTE"
   | "CUIDADO_POST_COLOR"
   | "VALORACION_PRUEBA_COLOR"
-  | "OZONOTERAPIA_CAPILAR";
+  | "OZONOTERAPIA_CAPILAR"
+  | "FICHA_ESTILIZADO";
 
 type VistaPrincipal = "fichas" | "productos" | "calendario" | "menu-principal" | "ver-fichas";
 // Código de calificación del cliente desactivado temporalmente.
@@ -2438,6 +2440,8 @@ export function AttentionProtocol({
           return <FichaValoracionPruebaColor {...fichaProps} />;
         case "OZONOTERAPIA_CAPILAR":
           return <FichaOzonoterapiaCapilar {...fichaProps} />;
+        case "FICHA_ESTILIZADO":
+          return <FichaEstilizado {...fichaProps} />;
         default:
           return null;
       }

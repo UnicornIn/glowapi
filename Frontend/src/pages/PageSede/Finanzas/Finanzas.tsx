@@ -317,7 +317,7 @@ export default function FinanzasPage() {
       });
       setSedes(filtered);
       if (filtered.length === 0) { setSelectedSede(""); return; }
-      if (filtered.length > 1) {
+      if (features.multiSede && filtered.length > 1) {
         setSelectedSede((cur) => {
           if (cur === "global") return "global";
           if (cur && filtered.some((s) => s.sede_id === cur)) return cur;
@@ -668,7 +668,7 @@ export default function FinanzasPage() {
               <div className="text-xs text-slate-500 mt-0.5">Estado financiero y cierre de caja · {user?.pais || "Colombia"} · {monedaUsuario}</div>
             </div>
             <div className="flex gap-1.5 items-center">
-              {sedes.length > 1 && (
+              {features.multiSede && sedes.length > 1 && (
                 <SedeDropdown
                   value={selectedSede}
                   onChange={handleSedeChange}

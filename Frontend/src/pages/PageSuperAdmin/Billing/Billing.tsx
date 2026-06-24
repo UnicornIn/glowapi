@@ -9,6 +9,7 @@ import { FacturaDetailModal } from "../../PageSede/Sales-invoiced/factura-detail
 import { DirectSaleModal } from "../../PageSede/Billing/DirectSaleModal"
 import type { Factura } from "../../../types/factura"
 import { DEFAULT_PERIOD } from "../../../lib/period"
+import { features } from "../../../config/features"
 import { toLocalYMD } from "../../../lib/dateFormat"
 import { useAuth } from "../../../components/Auth/AuthContext"
 import {
@@ -147,7 +148,7 @@ export default function SuperAdminBilling() {
 
   const [sedes, setSedes] = useState<Sede[]>([])
   const [sedeIdMap, setSedeIdMap] = useState<Record<string, string>>({})
-  const [selectedSedeId, setSelectedSedeId] = useState<string>("todas")
+  const [selectedSedeId, setSelectedSedeId] = useState<string>(features.multiSede ? "todas" : "")
   const [loadingSedes, setLoadingSedes] = useState(true)
 
   const [period, setPeriod] = useState(DEFAULT_PERIOD)
@@ -210,6 +211,12 @@ export default function SuperAdminBilling() {
     }
     loadSedes()
   }, [])
+
+  useEffect(() => {
+    if (!features.multiSede && sedes.length > 0 && !selectedSedeId) {
+      setSelectedSedeId(sedes[0]._id)
+    }
+  }, [sedes, selectedSedeId])
 
   const getSedeApiId = (sede: Sede): string => sedeIdMap[sede._id] || sede.sede_id || sede._id
 
@@ -518,7 +525,7 @@ export default function SuperAdminBilling() {
                   disabled={loadingSedes}
                   className="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:border-gray-400 min-w-[200px]"
                 >
-                  <option value="todas">Todas las sedes</option>
+                  {features.multiSede && <option value="todas">Todas las sedes</option>}
                   {sedes.map((s) => (
                     <option key={s._id} value={s._id}>{formatSedeNombre(s.nombre)}</option>
                   ))}

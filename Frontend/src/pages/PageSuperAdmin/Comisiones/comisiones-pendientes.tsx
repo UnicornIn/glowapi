@@ -8,6 +8,7 @@ import { sedeService } from "../Sedes/sedeService";
 import type { Sede } from "../../../types/sede";
 import { formatSedeNombre } from "../../../lib/sede";
 import { formatCurrencyNoDecimals, getStoredCurrency } from "../../../lib/currency";
+import { features } from "../../../config/features";
 
 // Formatea valores con la moneda persistida para el usuario.
 const formatMoneda = (monto: number, moneda: string = getStoredCurrency("USD")): string => {
@@ -171,6 +172,7 @@ export function ComisionesPendientes() {
       <div className="mb-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold text-gray-900">Comisiones Pendientes</h2>
+          {features.multiSede && sedes.length > 1 && (
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-600">Sede:</span>
             <select
@@ -186,6 +188,7 @@ export function ComisionesPendientes() {
               ))}
             </select>
           </div>
+          )}
         </div>
         
         <p className="text-sm text-gray-600">

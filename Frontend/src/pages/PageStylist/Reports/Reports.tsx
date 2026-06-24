@@ -493,7 +493,7 @@ export default function StylistReportsPage() {
                 .map((chunk) => chunk[0])
                 .join("")
                 .slice(0, 2)
-                .toUpperCase() || "RF"}
+                .toUpperCase() || "S"}
             </div>
             <div className="flex-1">
               <p className="text-base font-semibold text-gray-900">

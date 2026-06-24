@@ -1,6 +1,6 @@
 {
-  "name": "salon-agenda-template",
-  "description": "Reusable white-label salon management web app template (React + Vite + TypeScript). Tenant branding and features are driven by environment variables via a centralized tenant config.",
+  "name": "appagenda-sens",
+  "description": "Salon management app - sëns",
   "private": true,
   "version": "0.0.0",
   "type": "module",
