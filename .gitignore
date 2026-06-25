@@ -22,6 +22,9 @@ Frontend/node_modules/
 Frontend/dist/
 Frontend/.env.local
 
+# ── Doc interno de integración (no se sube; se comparte aparte) ──
+INTEGRACION_FRONTEND_BACKEND.md
+
 # ── Editor / SO ─────────────────────────────────────────────
 .vscode/
 .idea/
