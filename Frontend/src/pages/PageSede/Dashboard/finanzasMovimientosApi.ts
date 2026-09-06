@@ -126,6 +126,12 @@ const CATEGORIA_EGRESO_MENOR_MAP: Record<string, string> = {
   otro: "otro",
 };
 
+const CATEGORIA_INGRESO_MENOR_MAP: Record<string, string> = {
+  reembolso: "reembolso",
+  "ingreso extraordinario": "ingreso_extraordinario",
+  otro: "otro",
+};
+
 const METODO_PAGO_MAP: Record<string, string> = {
   efectivo: "efectivo",
   transferencia: "transferencia",
@@ -146,7 +152,7 @@ const METODO_PAGO_MAP: Record<string, string> = {
 };
 
 export const normalizeCategoria = (
-  tipo: "egreso-mayor" | "ingreso-mayor" | "egreso-menor",
+  tipo: "egreso-mayor" | "ingreso-mayor" | "egreso-menor" | "ingreso-menor",
   value: string
 ): string => {
   const key = value.trim().toLowerCase();
@@ -155,7 +161,9 @@ export const normalizeCategoria = (
       ? CATEGORIA_EGRESO_MAYOR_MAP
       : tipo === "ingreso-mayor"
         ? CATEGORIA_INGRESO_MAYOR_MAP
-        : CATEGORIA_EGRESO_MENOR_MAP;
+        : tipo === "ingreso-menor"
+          ? CATEGORIA_INGRESO_MENOR_MAP
+          : CATEGORIA_EGRESO_MENOR_MAP;
   return map[key] ?? "otro";
 };
 
@@ -252,6 +260,20 @@ export const crearEgresoMenor = (
     observaciones?: string;
   }
 ) => post(token, "egreso-caja-menor", body);
+
+/** POST /finanzas/movimientos/ingreso-caja-menor */
+export const crearIngresoMenor = (
+  token: string,
+  body: {
+    sede_id: string;
+    fecha: string;
+    concepto: string;
+    monto: number;
+    categoria: string;
+    metodo_pago?: string;
+    observaciones?: string;
+  }
+) => post(token, "ingreso-caja-menor", body);
 
 /** POST /finanzas/movimientos/traslado */
 export const crearTraslado = (

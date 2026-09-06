@@ -210,7 +210,14 @@ export default function Gastos() {
                 <select value={form.moneda}
                   onChange={(e) => setForm({ ...form, moneda: e.target.value })}
                   className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-1 focus:ring-gray-900 outline-none">
-                  {["USD", "COP", "MXN"].map((m) => <option key={m}>{m}</option>)}
+                  {/* La moneda real de la sede va primero — la lista fija
+                      ["USD","COP","MXN"] no incluía BOB (ni ninguna otra
+                      moneda), así que un <select> controlado con
+                      value={form.moneda}="BOB" no tenía ninguna opción que
+                      coincidiera visualmente. */}
+                  {Array.from(new Set([user?.moneda, "USD", "COP", "MXN"].filter(Boolean))).map((m) => (
+                    <option key={m}>{m}</option>
+                  ))}
                 </select>
               </div>
 

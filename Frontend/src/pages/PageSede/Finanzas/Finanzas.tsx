@@ -28,6 +28,7 @@ import {
   crearEgresoMayor,
   crearIngresoMayor,
   crearEgresoMenor,
+  crearIngresoMenor,
   crearTraslado,
   normalizeCategoria,
   normalizeMetodoPago,
@@ -52,7 +53,7 @@ const normalizeSedeId = (value: string | null | undefined) =>
 
 type FinanzasTab = "estado-financiero" | "cierre-caja";
 type FinancialSubTab = "pl" | "cajas" | "traslados" | "registrar";
-type RegistrarSubTab = "egreso-mayor" | "ingreso-mayor" | "traslado" | "egreso-menor" | "devolucion" | "propina" | "nomina";
+type RegistrarSubTab = "egreso-mayor" | "ingreso-mayor" | "traslado" | "egreso-menor" | "ingreso-menor" | "devolucion" | "propina" | "nomina";
 
 interface MovimientoManual {
   id: string;
@@ -154,7 +155,9 @@ export default function FinanzasPage() {
   const [loadingResumen, setLoadingResumen] = useState(false);
   const [cierresHistorial, setCierresHistorial] = useState<any[]>([]);
   const [loadingCierres, setLoadingCierres] = useState(false);
-  const [movimientosManuales, _setMovimientosManuales] = useState<MovimientoManual[]>([]);
+  const [movimientosManuales, setMovimientosManuales] = useState<MovimientoManual[]>([]);
+  const [loadingMovimientos, setLoadingMovimientos] = useState(false);
+  const [eliminandoMovimientoId, setEliminandoMovimientoId] = useState<string | null>(null);
 
   // Tab state
   // Si cierreCaja está apagado por feature flag, ?tab=cierre-caja cae en estado-financiero
@@ -175,6 +178,7 @@ export default function FinanzasPage() {
   const [trasladoForm, setTrasladoForm] = useState({ monto: "", fecha: resolveToday(), concepto: "", observaciones: "" });
   const [transferDir, setTransferDir] = useState<"menor-mayor" | "mayor-menor">("menor-mayor");
   const [egresoMenorForm, setEgresoMenorForm] = useState({ concepto: "", monto: "", categoria: "Gasto operativo", fecha: resolveToday(), observaciones: "" });
+  const [ingresoMenorForm, setIngresoMenorForm] = useState({ concepto: "", monto: "", categoria: "Reembolso", metodo: CASH_PAYMENT_METHOD_OPTIONS[0].value, fecha: resolveToday(), observaciones: "" });
   const [devolucionForm, setDevolucionForm] = useState({ numeroVenta: "", monto: "", saleDe: "caja_menor", motivo: "Cliente insatisfecha", observaciones: "" });
   const [propinaForm, setPropinaForm] = useState({ estilista: "", monto: "", metodoOriginal: "efectivo", fecha: resolveToday() });
   const [nominaForm, setNominaForm] = useState({ empleado: "", monto: "", saleDe: "caja_mayor", periodo: "Primera quincena", observaciones: "" });
@@ -358,6 +362,70 @@ export default function FinanzasPage() {
     finally { setLoadingCierres(false); }
   }, [selectedSede, isSpecificSede, buildInvoiceRange]);
 
+  const loadMovimientos = useCallback(async () => {
+    if (!isSpecificSede) { setMovimientosManuales([]); return; }
+    try {
+      setLoadingMovimientos(true);
+      const range = buildInvoiceRange();
+      const [ingresosRaw, egresosRaw] = await Promise.all([
+        cashService.getIngresos({ sede_id: selectedSede, fecha_inicio: range.start_date, fecha_fin: range.end_date }),
+        cashService.getEgresos({ sede_id: selectedSede, fecha_inicio: range.start_date, fecha_fin: range.end_date }),
+      ]);
+      const ingresosList = Array.isArray(ingresosRaw) ? ingresosRaw : ingresosRaw?.ingresos ?? [];
+      const egresosList = Array.isArray(egresosRaw) ? egresosRaw : egresosRaw?.egresos ?? [];
+
+      const nombreCaja = (caja?: string) => (caja === "caja_mayor" ? "Caja Mayor" : "Caja Menor");
+
+      const combinados: MovimientoManual[] = [
+        ...ingresosList.map((i: any) => ({
+          id: i.ingreso_id,
+          fecha: i.fecha,
+          tipo: "Ingreso",
+          caja: nombreCaja(i.caja),
+          concepto: i.motivo || "Ingreso manual",
+          categoria: i.metodo_pago || "—",
+          monto: Number(i.monto) || 0,
+        })),
+        ...egresosList.map((e: any) => ({
+          id: e.egreso_id,
+          fecha: e.fecha,
+          tipo: e.tipo === "traslado" ? "Traslado" : "Egreso",
+          caja: nombreCaja(e.caja),
+          concepto: e.concepto || "Egreso manual",
+          categoria: e.tipo || "—",
+          monto: Number(e.monto) || 0,
+        })),
+      ].sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0));
+
+      setMovimientosManuales(combinados);
+    } catch {
+      setMovimientosManuales([]);
+    } finally {
+      setLoadingMovimientos(false);
+    }
+  }, [selectedSede, isSpecificSede, buildInvoiceRange]);
+
+  const handleEliminarMovimiento = async (mov: MovimientoManual) => {
+    const motivo = window.prompt(`Motivo para eliminar este ${mov.tipo.toLowerCase()} (obligatorio):`);
+    if (!motivo || !motivo.trim()) return;
+
+    setEliminandoMovimientoId(mov.id);
+    try {
+      if (mov.tipo === "Ingreso") {
+        await cashService.deleteIngreso(mov.id, { motivo: motivo.trim() });
+      } else {
+        await cashService.deleteEgreso(mov.id, { motivo: motivo.trim() });
+      }
+      toast.success(`${mov.tipo} eliminado`);
+      setMovimientosManuales((prev) => prev.filter((m) => m.id !== mov.id));
+      setReloadNonce((n) => n + 1);
+    } catch (e: any) {
+      toast.error(e?.message || `No se pudo eliminar el ${mov.tipo.toLowerCase()}`);
+    } finally {
+      setEliminandoMovimientoId(null);
+    }
+  };
+
   const loadFinancialData = useCallback(async () => {
     if (!user?.access_token || !selectedSede) return;
     try {
@@ -416,6 +484,7 @@ export default function FinanzasPage() {
   useEffect(() => { loadFinancialData(); }, [loadFinancialData, reloadNonce]);
   useEffect(() => { loadResumenFinanciero(); }, [loadResumenFinanciero, reloadNonce]);
   useEffect(() => { loadCierres(); }, [loadCierres, reloadNonce]);
+  useEffect(() => { loadMovimientos(); }, [loadMovimientos, reloadNonce]);
 
   useEffect(() => {
     if (isSpecificSede) setRegistrarSedeId(selectedSede);
@@ -479,6 +548,19 @@ export default function FinanzasPage() {
     finally { setRegistrarLoading(false); }
   };
 
+  const handleIngresoMenor = async () => {
+    if (!ingresoMenorForm.concepto || !ingresoMenorForm.monto) { setRegistrarError("Completa concepto y monto"); return; }
+    try {
+      setRegistrarLoading(true); setRegistrarError(null);
+      await crearIngresoMenor(user!.access_token, { sede_id: registrarSedeId, fecha: ingresoMenorForm.fecha, concepto: ingresoMenorForm.concepto, monto: parseFloat(ingresoMenorForm.monto.replace(/[^0-9.-]/g, "")), categoria: normalizeCategoria("ingreso-menor", ingresoMenorForm.categoria), metodo_pago: normalizeMetodoPago(ingresoMenorForm.metodo), observaciones: ingresoMenorForm.observaciones || undefined });
+      setRegistrarSuccess("Ingreso de caja menor registrado");
+      toast.success("Ingreso de caja menor registrado");
+      setIngresoMenorForm({ concepto: "", monto: "", categoria: "Reembolso", metodo: CASH_PAYMENT_METHOD_OPTIONS[0].value, fecha: resolveToday(), observaciones: "" });
+      setReloadNonce((n) => n + 1);
+    } catch (e: any) { setRegistrarError(e.message || "Error al registrar ingreso"); toast.error(e.message || "Error al registrar"); }
+    finally { setRegistrarLoading(false); }
+  };
+
   const handleDevolucion = async () => {
     if (!devolucionForm.numeroVenta || !devolucionForm.monto) { setRegistrarError("Completa número de venta y monto"); return; }
     try {
@@ -493,10 +575,10 @@ export default function FinanzasPage() {
   };
 
   const handlePropina = async () => {
-    if (!propinaForm.estilista || !propinaForm.monto) { setRegistrarError("Completa estilista y monto"); return; }
+    if (!propinaForm.estilista || !propinaForm.monto) { setRegistrarError("Completa profesional y monto"); return; }
     try {
       setRegistrarLoading(true); setRegistrarError(null);
-      await crearEgresoMenor(user!.access_token, { sede_id: registrarSedeId, fecha: propinaForm.fecha, concepto: `Propina estilista: ${propinaForm.estilista}`, monto: parseFloat(propinaForm.monto.replace(/[^0-9.-]/g, "")), categoria: normalizeCategoria("egreso-menor", "Propinas"), observaciones: `Método original: ${propinaForm.metodoOriginal === "efectivo" ? "Efectivo" : "Digital — traslado ya registrado"}` });
+      await crearEgresoMenor(user!.access_token, { sede_id: registrarSedeId, fecha: propinaForm.fecha, concepto: `Propina profesional: ${propinaForm.estilista}`, monto: parseFloat(propinaForm.monto.replace(/[^0-9.-]/g, "")), categoria: normalizeCategoria("egreso-menor", "Propinas"), observaciones: `Método original: ${propinaForm.metodoOriginal === "efectivo" ? "Efectivo" : "Digital — traslado ya registrado"}` });
       setRegistrarSuccess("Propina registrada");
       toast.success("Propina registrada correctamente");
       setPropinaForm({ estilista: "", monto: "", metodoOriginal: "efectivo", fecha: resolveToday() });
@@ -747,7 +829,7 @@ export default function FinanzasPage() {
                     <span>Total ingresos</span><span>{formatCurrency(metricas.ventas_totales)}</span>
                   </div>
                   <div className="text-[10px] font-bold uppercase tracking-[0.5px] text-slate-400 mt-3 mb-1">Costos directos</div>
-                  <RowItem name={<>Comisiones estilistas <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200 ml-1.5">Auto · Citas</span></>} value={<span className="text-slate-400">—</span>} />
+                  <RowItem name={<>Comisiones profesionales <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-blue-50 text-blue-600 border border-blue-200 ml-1.5">Auto · Citas</span></>} value={<span className="text-slate-400">—</span>} />
                   <RowItem name={<>Insumos usados <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Manual · Caja Mayor</span></>} value={<span className="text-slate-400">—</span>} />
                   <div className="flex justify-between pt-2 pb-1 text-[13px] font-bold border-t border-slate-200 mt-1">
                     <span>Utilidad bruta</span><span className="text-slate-400">—</span>
@@ -760,7 +842,7 @@ export default function FinanzasPage() {
                   <RowItem name={<>Otros gastos fijos <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Manual · Caja Mayor</span></>} value={<span className="text-slate-400">—</span>} />
                   <div className="text-[10px] font-bold uppercase tracking-[0.5px] text-slate-400 mt-3 mb-1">Gastos variables</div>
                   <RowItem name={<>Gastos operativos caja menor</>} value={loadingResumen ? "…" : resumenFinanciero ? <span className="text-red-600">-{formatCurrency(resumenFinanciero.pl.egresos_menor_total ?? 0)}</span> : <span className="text-slate-400">—</span>} />
-                  <RowItem name={<>Propinas estilistas <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Pass-through</span></>} value={<span className="text-slate-400">—</span>} />
+                  <RowItem name={<>Propinas profesionales <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Pass-through</span></>} value={<span className="text-slate-400">—</span>} />
                   <div className="flex justify-between pt-2 pb-1 text-[13px] font-bold border-t border-slate-200 mt-1">
                     <span>Total egresos manuales</span>
                     <span>{loadingResumen ? "…" : resumenFinanciero ? formatCurrency(resumenFinanciero.pl.egresos) : "–"}</span>
@@ -786,7 +868,7 @@ export default function FinanzasPage() {
                   <Card title="Origen de los datos">
                     <div className="text-[11px] text-slate-500 leading-relaxed space-y-2.5">
                       <div><span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-slate-200 text-slate-400">Auto · Facturación</span> — Se calcula automáticamente de las ventas cobradas en el módulo de Facturación.</div>
-                      <div><span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-slate-200 text-slate-400">Auto · Citas</span> — Se calcula automáticamente del % de comisión configurado por estilista.</div>
+                      <div><span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-slate-200 text-slate-400">Auto · Citas</span> — Se calcula automáticamente del % de comisión configurado por profesional.</div>
                       <div><span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-slate-200 text-slate-400">Auto · Caja Menor</span> — Viene de los egresos registrados por recepción en la caja del punto de venta.</div>
                       <div><span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase border border-dashed border-slate-300 text-slate-500">Manual · Caja Mayor</span> — Lo registra el administrador en la pestaña <span className="font-semibold text-slate-700">"Registrar movimientos"</span>.</div>
                     </div>
@@ -821,7 +903,7 @@ export default function FinanzasPage() {
                   <RowItem name={<span className="text-slate-400">⇄ Recibido de Caja Mayor <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Manual</span></span>} value={loadingResumen ? "…" : resumenFinanciero ? formatCurrency(resumenFinanciero.traslados.mayor_a_menor) : "–"} />
                   <div className="text-[10px] font-bold uppercase tracking-[0.5px] text-slate-400 mt-3 mb-1">Salidas</div>
                   <RowItem name={<>Gastos operativos <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Manual · Recepción</span></>} value={<span className="text-slate-400">—</span>} />
-                  <RowItem name={<>Propinas estilistas <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Pass-through</span></>} value={<span className="text-slate-400">—</span>} />
+                  <RowItem name={<>Propinas profesionales <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Pass-through</span></>} value={<span className="text-slate-400">—</span>} />
                   <RowItem name={<>Devoluciones a clientes <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Manual</span></>} value={<span className="text-slate-400">—</span>} />
                   <RowItem name={<span className="text-slate-400">⇄ Entregas a Caja Mayor <span className="inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-slate-100 text-slate-500 border border-slate-200 ml-1.5">Manual</span></span>} value={loadingResumen ? "…" : resumenFinanciero ? formatCurrency(resumenFinanciero.traslados.menor_a_mayor) : "–"} />
                   <div className="border-t border-slate-200 mt-2" />
@@ -1039,8 +1121,9 @@ export default function FinanzasPage() {
                             { id: "ingreso-mayor" as const, label: "Ingreso Caja Mayor" },
                             { id: "traslado" as const, label: "Traslado entre cajas" },
                             { id: "egreso-menor" as const, label: "Egreso Caja Menor" },
+                            { id: "ingreso-menor" as const, label: "Ingreso Caja Menor" },
                             { id: "devolucion" as const, label: "Devolución a cliente" },
-                            { id: "propina" as const, label: "Propina estilista" },
+                            { id: "propina" as const, label: "Propina profesional" },
                             { id: "nomina" as const, label: "Nómina administrativa" },
                           ]).map((st) => (
                             <button key={st.id} onClick={() => setRegistrarSubTab(st.id)} className={`px-4 py-2 border rounded-lg text-[11px] font-medium transition-colors ${registrarSubTab === st.id ? "bg-slate-800 text-white border-slate-800" : "bg-white border-slate-200 text-slate-500 hover:bg-slate-50"}`}>{st.label}</button>
@@ -1055,7 +1138,7 @@ export default function FinanzasPage() {
                           <div className="grid grid-cols-2 gap-2.5">
                             <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Concepto</label><input value={egresoMayorForm.concepto} onChange={(e) => setEgresoMayorForm((f) => ({ ...f, concepto: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="Ej: Arriendo local" /></div>
                             <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Monto</label><input value={egresoMayorForm.monto} onChange={(e) => setEgresoMayorForm((f) => ({ ...f, monto: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="$0" /></div>
-                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Categoría</label><select value={egresoMayorForm.categoria} onChange={(e) => setEgresoMayorForm((f) => ({ ...f, categoria: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] bg-white focus:outline-none focus:border-slate-800"><option value="">Seleccionar...</option><option>Arriendo</option><option>Nómina administrativa</option><option>Comisiones estilistas</option><option>Servicios públicos</option><option>Impuestos</option><option>Insumos / Proveedores</option><option>Mantenimiento</option><option>Marketing y publicidad</option><option>Software y herramientas</option><option>Otro gasto fijo</option><option>Otro gasto operativo</option></select></div>
+                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Categoría</label><select value={egresoMayorForm.categoria} onChange={(e) => setEgresoMayorForm((f) => ({ ...f, categoria: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] bg-white focus:outline-none focus:border-slate-800"><option value="">Seleccionar...</option><option>Arriendo</option><option>Nómina administrativa</option><option>Comisiones profesionales</option><option>Servicios públicos</option><option>Impuestos</option><option>Insumos / Proveedores</option><option>Mantenimiento</option><option>Marketing y publicidad</option><option>Software y herramientas</option><option>Otro gasto fijo</option><option>Otro gasto operativo</option></select></div>
                             <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Método de pago</label><select value={egresoMayorForm.metodo} onChange={(e) => setEgresoMayorForm((f) => ({ ...f, metodo: e.target.value as typeof f.metodo }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] bg-white focus:outline-none focus:border-slate-800">{CASH_PAYMENT_METHOD_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}</select></div>
                             <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Fecha</label><DatePicker value={egresoMayorForm.fecha} onChange={(v) => setEgresoMayorForm((f) => ({ ...f, fecha: v }))} /></div>
                             <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Referencia</label><input value={egresoMayorForm.referencia} onChange={(e) => setEgresoMayorForm((f) => ({ ...f, referencia: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="Opcional" /></div>
@@ -1127,6 +1210,25 @@ export default function FinanzasPage() {
                         </div>
                       )}
 
+                      {registrarSedeId && registrarSubTab === "ingreso-menor" && (
+                        <div className="bg-white border border-slate-200 rounded-[10px] p-5 mb-4">
+                          <div className="text-[14px] font-bold text-slate-800 mb-1">Registrar ingreso — Caja Menor</div>
+                          <div className="text-[11px] text-slate-500 mb-4">Ingresos en efectivo que no vienen de una venta o cita: reembolsos, ingresos extraordinarios.</div>
+                          <div className="grid grid-cols-2 gap-2.5">
+                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Concepto</label><input value={ingresoMenorForm.concepto} onChange={(e) => setIngresoMenorForm((f) => ({ ...f, concepto: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="Ej: Reembolso de insumo devuelto" /></div>
+                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Monto</label><input value={ingresoMenorForm.monto} onChange={(e) => setIngresoMenorForm((f) => ({ ...f, monto: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="$0" /></div>
+                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Categoría</label><select value={ingresoMenorForm.categoria} onChange={(e) => setIngresoMenorForm((f) => ({ ...f, categoria: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] bg-white focus:outline-none focus:border-slate-800"><option>Reembolso</option><option>Ingreso extraordinario</option><option>Otro</option></select></div>
+                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Método</label><select value={ingresoMenorForm.metodo} onChange={(e) => setIngresoMenorForm((f) => ({ ...f, metodo: e.target.value as typeof f.metodo }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] bg-white focus:outline-none focus:border-slate-800">{CASH_PAYMENT_METHOD_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}</select></div>
+                            <div className="flex flex-col gap-1"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Fecha</label><DatePicker value={ingresoMenorForm.fecha} onChange={(v) => setIngresoMenorForm((f) => ({ ...f, fecha: v }))} /></div>
+                            <div className="flex flex-col gap-1 col-span-2"><label className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.4px]">Observaciones</label><textarea value={ingresoMenorForm.observaciones} onChange={(e) => setIngresoMenorForm((f) => ({ ...f, observaciones: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[12px] resize-y min-h-[56px] focus:outline-none focus:border-slate-800" placeholder="Opcional" /></div>
+                          </div>
+                          <div className="flex gap-2 justify-end mt-4">
+                            <button onClick={() => setIngresoMenorForm({ concepto: "", monto: "", categoria: "Reembolso", metodo: CASH_PAYMENT_METHOD_OPTIONS[0].value, fecha: resolveToday(), observaciones: "" })} className="px-4 py-2 border border-slate-200 rounded-md text-[12px] font-semibold text-slate-500 hover:bg-slate-50">Cancelar</button>
+                            <button onClick={handleIngresoMenor} disabled={registrarLoading} className="px-4 py-2 bg-slate-800 text-white rounded-md text-[12px] font-semibold hover:bg-slate-700 disabled:opacity-60">{registrarLoading ? "Registrando..." : "Registrar ingreso"}</button>
+                          </div>
+                        </div>
+                      )}
+
                       {/* ── DEVOLUCIÓN A CLIENTE ── */}
                       {registrarSedeId && registrarSubTab === "devolucion" && (
                         <div className="bg-white border border-slate-200 rounded-md p-6 mb-4 max-w-[740px] shadow-sm">
@@ -1164,16 +1266,16 @@ export default function FinanzasPage() {
                         </div>
                       )}
 
-                      {/* ── PROPINA ESTILISTA ── */}
+                      {/* ── PROPINA PROFESIONAL ── */}
                       {registrarSedeId && registrarSubTab === "propina" && (
                         <div className="bg-white border border-slate-200 rounded-md p-6 mb-4 max-w-[740px] shadow-sm">
-                          <div className="text-[15px] font-semibold text-slate-800 mb-1">Registrar propina — estilista</div>
+                          <div className="text-[15px] font-semibold text-slate-800 mb-1">Registrar propina — profesional</div>
                           <div className="text-[12.5px] text-slate-400 mb-5">Pass-through: no afecta el P&L. Si la propina llegó digital (tarjeta/transferencia), primero se hace un traslado Caja Mayor → Caja Menor, luego este egreso.</div>
                           <div className="bg-amber-50 border border-amber-200 rounded-md px-3.5 py-2.5 mb-4 text-[12.5px] text-amber-600">
                             <strong className="text-slate-800">⚠ Importante:</strong> Si la propina fue pagada por tarjeta o transferencia, primero registra el traslado Caja Mayor → Caja Menor antes de continuar.
                           </div>
                           <div className="grid grid-cols-2 gap-3.5 mb-3.5">
-                            <div className="flex flex-col gap-1.5"><label className="text-[11px] font-semibold text-slate-500 uppercase tracking-[0.06em]">Estilista</label><input value={propinaForm.estilista} onChange={(e) => setPropinaForm((f) => ({ ...f, estilista: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="Nombre del estilista" /></div>
+                            <div className="flex flex-col gap-1.5"><label className="text-[11px] font-semibold text-slate-500 uppercase tracking-[0.06em]">Profesional</label><input value={propinaForm.estilista} onChange={(e) => setPropinaForm((f) => ({ ...f, estilista: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="Nombre del profesional" /></div>
                             <div className="flex flex-col gap-1.5"><label className="text-[11px] font-semibold text-slate-500 uppercase tracking-[0.06em]">Monto</label><input value={propinaForm.monto} onChange={(e) => setPropinaForm((f) => ({ ...f, monto: e.target.value }))} className="px-3 py-2 border border-slate-200 rounded-md text-[13px] focus:outline-none focus:border-slate-800" placeholder="$ 0" /></div>
                           </div>
                           <div className="grid grid-cols-2 gap-3.5 mb-3.5">
@@ -1233,11 +1335,13 @@ export default function FinanzasPage() {
                       {/* Historial movimientos */}
                       {registrarSedeId && (
                         <Card title="Últimos movimientos" titleSub="historial" scrollable action={<FiltroSeccion valor={filtroMovimientos} onChange={setFiltroMovimientos} rango={rangoMovimientos} onRangoChange={setRangoMovimientos} />}>
-                          {movimientosManuales.length === 0 ? (
+                          {loadingMovimientos ? (
+                            <div className="py-8 text-center text-[11px] text-slate-400">Cargando movimientos…</div>
+                          ) : movimientosManuales.length === 0 ? (
                             <div className="py-8 text-center text-[11px] text-slate-400">No hay movimientos registrados aún.</div>
                           ) : (
                             <table className="w-full border-collapse">
-                              <thead><tr>{["Fecha", "Caja", "Tipo", "Concepto", "Categoría", "Monto"].map((h, i) => <th key={i} className={`text-left text-[9px] font-bold uppercase tracking-[0.5px] text-slate-400 pb-2 border-b border-slate-200 ${i === 5 ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
+                              <thead><tr>{["Fecha", "Caja", "Tipo", "Concepto", "Categoría", "Monto", ""].map((h, i) => <th key={i} className={`text-left text-[9px] font-bold uppercase tracking-[0.5px] text-slate-400 pb-2 border-b border-slate-200 ${i === 5 ? "text-right" : ""}`}>{h}</th>)}</tr></thead>
                               <tbody>{movimientosManuales.map((m) => (
                                 <tr key={m.id} className="border-b border-slate-100 last:border-0">
                                   <td className="py-2.5 text-[11px] text-slate-600">{m.fecha}</td>
@@ -1246,6 +1350,17 @@ export default function FinanzasPage() {
                                   <td className="py-2.5 text-[11px] text-slate-700 font-medium max-w-[160px] truncate">{m.concepto}</td>
                                   <td className="py-2.5 text-[11px] text-slate-500">{m.categoria}</td>
                                   <td className="py-2.5 text-[11px] text-right font-semibold text-slate-800">{formatMoney(m.monto, monedaUsuario)}</td>
+                                  <td className="py-2.5 text-right">
+                                    {m.tipo !== "Traslado" && (
+                                      <button
+                                        onClick={() => handleEliminarMovimiento(m)}
+                                        disabled={eliminandoMovimientoId === m.id}
+                                        className="text-[10px] font-semibold text-red-500 hover:text-red-700 disabled:opacity-50"
+                                      >
+                                        {eliminandoMovimientoId === m.id ? "Eliminando..." : "Eliminar"}
+                                      </button>
+                                    )}
+                                  </td>
                                 </tr>
                               ))}</tbody>
                             </table>
