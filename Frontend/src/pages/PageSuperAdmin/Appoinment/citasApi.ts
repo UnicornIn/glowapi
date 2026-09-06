@@ -145,3 +145,66 @@ export const registrarPagoCita = async (
 
   return await response.json();
 };
+
+// Cancelación "real" de la cita — a diferencia de mandar {estado:'cancelada'}
+// por `updateQuote` (que solo cambia el campo y no dispara nada más), este
+// endpoint dedicado libera la reserva de giftcard y traslada el abono a
+// saldo a favor del cliente. Usar SIEMPRE este endpoint para cancelar, no
+// updateQuote — de lo contrario esos efectos financieros nunca ocurren.
+export const cancelarCita = async (citaId: string, token: string) => {
+  const response = await fetch(`${API_BASE_URL}scheduling/quotes/${citaId}/cancelar`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw await buildApiRequestError(response, 'Error al cancelar cita');
+  }
+
+  return await response.json();
+};
+
+// Eliminación permanente — solo válida para citas ya canceladas o
+// marcadas como "no asistió" (el backend lo re-valida igual).
+export const eliminarCita = async (citaId: string, token: string) => {
+  const response = await fetch(`${API_BASE_URL}scheduling/quotes/${citaId}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw await buildApiRequestError(response, 'Error al eliminar cita');
+  }
+
+  return await response.json();
+};
+
+// Corrige el método y/o el monto de un registro ya guardado en
+// historial_pagos (por índice) — para cuando recepción se equivoca al
+// registrar el pago (método incorrecto o monto mal tipeado). El backend
+// recalcula abono/saldo_pendiente/estado_pago cuando cambia el monto, y
+// bloquea la corrección si la cita ya fue facturada.
+export const corregirPago = async (
+  citaId: string,
+  indice: number,
+  cambios: { metodo?: string; monto?: number },
+  token: string
+) => {
+  const response = await fetch(
+    `${API_BASE_URL}scheduling/quotes/${citaId}/pagos/${indice}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(cambios),
+    }
+  );
+
+  if (!response.ok) {
+    throw await buildApiRequestError(response, 'Error al corregir el pago');
+  }
+
+  return await response.json();
+};

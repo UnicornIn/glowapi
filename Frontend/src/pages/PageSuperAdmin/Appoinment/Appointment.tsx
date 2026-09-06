@@ -73,6 +73,7 @@ const RF_STATUSES = {
   'pre-cita':    { color: '#9CA3AF', bg: '#F3F4F6', label: 'Pre-cita' },
   'confirmed':   { color: '#3B82F6', bg: '#EFF6FF', label: 'Confirmada' },
   'in-progress': { color: '#8B5CF6', bg: '#F5F3FF', label: 'En curso' },
+  'finalizado':  { color: '#F97316', bg: '#FFF7ED', label: 'Finalizado' },
   'completed':   { color: '#10B981', bg: '#ECFDF5', label: 'Facturada' },
   'cancelled':   { color: '#EF4444', bg: '#FEF2F2', label: 'Cancelada' },
   'no-asistio':  { color: '#CA8A04', bg: '#FEFCE8', label: 'No asistió' },
@@ -85,7 +86,12 @@ const resolveRFStatus = (estado: string): RFStatusKey => {
   if (v === 'no_asistio' || v === 'no asistio' || v.includes('no_asistio') || v.includes('no asistio')) return 'no-asistio';
   if (['pre-cita', 'pre_cita', 'precita', 'pre_reservada'].some(s => v.includes(s))) return 'pre-cita';
   if (['en proc', 'en_proc', 'proceso', 'en curso', 'en_curso', 'en-curso', 'progres', 'in-prog'].some(s => v.includes(s))) return 'in-progress';
-  if (['complet', 'finaliz', 'terminad', 'realizad', 'factur'].some(s => v.includes(s))) return 'completed';
+  // 'finalizado' = el profesional ya terminó el servicio pero AÚN NO se ha
+  // facturado (eso lo hace admin/recepción desde Facturación). 'completed'
+  // (label "Facturada") debe reservarse para cuando de verdad hay una
+  // factura — no confundir ambos estados como hacía esta copia del archivo.
+  if (['finaliz'].some(s => v.includes(s))) return 'finalizado';
+  if (['complet', 'terminad', 'realizad', 'factur'].some(s => v.includes(s))) return 'completed';
   return 'confirmed';
 };
 
@@ -823,6 +829,7 @@ const CalendarScheduler: React.FC = () => {
     pre:        rfActiveApts.filter(a => resolveRFStatus(a.estado) === 'pre-cita').length,
     confirmed:  rfActiveApts.filter(a => resolveRFStatus(a.estado) === 'confirmed').length,
     inProgress: rfActiveApts.filter(a => resolveRFStatus(a.estado) === 'in-progress').length,
+    finalizado: rfActiveApts.filter(a => resolveRFStatus(a.estado) === 'finalizado').length,
     total:      appointments.reduce((s, a) => s + (parseFloat(a.rawData?.valor_total || '0') || 0), 0),
   }), [rfActiveApts, appointments]);
 
@@ -1378,6 +1385,7 @@ const CalendarScheduler: React.FC = () => {
               <span><b className="font-semibold" style={{ color: '#9CA3AF' }}>{rfSummary.pre}</b> pre-citas</span>
               <span><b className="font-semibold" style={{ color: '#3B82F6' }}>{rfSummary.confirmed}</b> confirmadas</span>
               <span><b className="font-semibold" style={{ color: '#8B5CF6' }}>{rfSummary.inProgress}</b> en curso</span>
+              <span><b className="font-semibold" style={{ color: '#F97316' }}>{rfSummary.finalizado}</b> finalizadas</span>
               <span className="ml-auto"><b className="font-semibold" style={{ color: '#1E293B' }}>{formatCOP(rfSummary.total)}</b> estimado</span>
             </div>
 
@@ -1512,6 +1520,10 @@ const CalendarScheduler: React.FC = () => {
               <span className="flex items-center gap-1">
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: '#8B5CF6', display: 'inline-block' }} />
                 En curso
+              </span>
+              <span className="flex items-center gap-1">
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: '#F97316', display: 'inline-block' }} />
+                Finalizado
               </span>
               <span className="flex items-center gap-1">
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: '#10B981', display: 'inline-block' }} />

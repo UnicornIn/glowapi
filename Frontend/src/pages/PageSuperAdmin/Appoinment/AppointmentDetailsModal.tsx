@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import Modal from "../../../components/ui/modal";
 import { useAuth } from "../../../components/Auth/AuthContext";
-import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, ApiRequestError } from "./citasApi";
+import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, cancelarCita, eliminarCita, corregirPago, ApiRequestError } from "./citasApi";
 import { formatDateDMY } from "../../../lib/dateFormat";
 import {
   getServicios,
@@ -144,10 +144,13 @@ interface ProfesionalDisponible {
   invalidAgendaId: boolean;
 }
 
+// "finalizado" (el profesional ya atendió, pendiente de facturar) SÍ debe
+// quedar editable a propósito — es el estado al que vuelve una cita tras
+// anular su factura, justo para poder corregir el servicio antes de volver
+// a facturar. No agregarlo acá de nuevo sin revisar ese flujo primero.
 const ESTADOS_NO_EDITABLES_SERVICIOS = new Set([
   "cancelada",
   "completada",
-  "finalizada",
   "no asistio",
   "no_asistio",
   "no asistió",
@@ -437,6 +440,10 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   const [updating, setUpdating] = useState(false);
   const [appointmentDetails, setAppointmentDetails] = useState<any>(null);
   const [showDebug, setShowDebug] = useState(false);
+  const [editandoPagoIdx, setEditandoPagoIdx] = useState<number | null>(null);
+  const [metodoEditado, setMetodoEditado] = useState("");
+  const [montoEditado, setMontoEditado] = useState("");
+  const [guardandoMetodoPago, setGuardandoMetodoPago] = useState(false);
   const [pagoModal, setPagoModal] = useState<PagoModalData>({
     show: false,
     tipo: "pago",
@@ -1162,18 +1169,24 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       Array.isArray(rawData.historial_pagos) &&
       rawData.historial_pagos.length > 0
         ? rawData.historial_pagos
-            .filter((pago: { monto?: number }) => (pago.monto ?? 0) > 0)
+            // El índice ORIGINAL (antes del filter) es el que identifica el
+            // pago en `historial_pagos` del backend — se captura acá porque
+            // el filter de abajo puede saltarse entradas y correr los índices.
             .map(
-              (pago: {
-                fecha?: string;
-                monto?: number;
-                metodo?: string;
-                tipo?: string;
-                registrado_por?: string;
-                saldo_despues?: number;
-                notas?: string;
-                codigo_giftcard?: string;
-              }) => ({
+              (
+                pago: {
+                  fecha?: string;
+                  monto?: number;
+                  metodo?: string;
+                  tipo?: string;
+                  registrado_por?: string;
+                  saldo_despues?: number;
+                  notas?: string;
+                  codigo_giftcard?: string;
+                },
+                indiceOriginal: number,
+              ) => ({
+                indiceOriginal,
                 fecha: formatDateDMY(pago.fecha, ""),
                 tipo:
                   pago.tipo === "abono_inicial"
@@ -1191,6 +1204,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                 codigoGiftcard: pago.codigo_giftcard || null,
               }),
             )
+            .filter((pago: { monto?: number }) => (pago.monto ?? 0) > 0)
         : [];
 
     return {
@@ -1250,11 +1264,18 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
 
     setUpdating(true);
     try {
-      await updateQuote(
-        appointmentDetails.id,
-        { estado: nuevoEstado },
-        user.access_token,
-      );
+      if (nuevoEstado === "cancelada") {
+        // Endpoint dedicado: además de cambiar el estado, libera la reserva
+        // de giftcard y traslada el abono a saldo a favor del cliente — el
+        // PUT genérico (updateQuote) no dispara ninguno de esos efectos.
+        await cancelarCita(appointmentDetails.id, user.access_token);
+      } else {
+        await updateQuote(
+          appointmentDetails.id,
+          { estado: nuevoEstado },
+          user.access_token,
+        );
+      }
 
       setAppointmentDetails({
         ...appointmentDetails,
@@ -1271,6 +1292,112 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       toast.error(extraerMensajeError(error, "No se pudo actualizar el estado"));
     } finally {
       setUpdating(false);
+    }
+  };
+
+  const ESTADOS_ELIMINABLES = ["cancelada", "no asistio", "no_asistio", "pre_reservada"];
+
+  const handleEliminarCita = async () => {
+    if (!appointmentDetails?.id || !user?.access_token) return;
+
+    const confirmed = await confirmAction({
+      title: "Eliminar cita",
+      message: "Esta cita se eliminará por completo del sistema — no queda en el historial. Esta acción no se puede deshacer.",
+      confirmLabel: "Sí, eliminar",
+      variant: "danger",
+    });
+    if (!confirmed) return;
+
+    setUpdating(true);
+    try {
+      await eliminarCita(appointmentDetails.id, user.access_token);
+      toast.success("Cita eliminada");
+      onClose();
+      if (onRefresh) {
+        setTimeout(() => onRefresh(), 500);
+      }
+    } catch (error: any) {
+      console.error("Error eliminando cita:", error);
+      toast.error(extraerMensajeError(error, "No se pudo eliminar la cita"));
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  // Una vez facturada, la corrección se bloquea también en el backend — acá
+  // solo se usa para no mostrar el link "Corregir" y ahorrar el viaje al
+  // servidor que sabemos que va a fallar.
+  const citaYaFacturada =
+    appointmentDetails?.rawData?.estado_factura === "facturado" ||
+    (appointmentDetails?.estado || "").toLowerCase() === "completada";
+
+  const iniciarEdicionMetodoPago = (indiceOriginal: number, metodoActual: string, montoActual: number) => {
+    setEditandoPagoIdx(indiceOriginal);
+    setMetodoEditado(normalizePaymentMethodForBackend(metodoActual) || "efectivo");
+    setMontoEditado(String(montoActual ?? ""));
+  };
+
+  const handleGuardarMetodoPago = async (indiceOriginal: number) => {
+    if (!appointmentDetails?.id || !user?.access_token) return;
+
+    const original = appointmentDetails?.rawData?.historial_pagos?.[indiceOriginal];
+    const montoNumero = Number(montoEditado);
+    if (!montoNumero || montoNumero <= 0) {
+      toast.error("El monto debe ser mayor a 0");
+      return;
+    }
+
+    const cambios: { metodo?: string; monto?: number } = {};
+    if (metodoEditado && metodoEditado !== (original?.metodo || "")) cambios.metodo = metodoEditado;
+    if (montoNumero !== Number(original?.monto || 0)) cambios.monto = montoNumero;
+
+    if (Object.keys(cambios).length === 0) {
+      setEditandoPagoIdx(null);
+      return;
+    }
+
+    setGuardandoMetodoPago(true);
+    try {
+      const resultado = await corregirPago(appointmentDetails.id, indiceOriginal, cambios, user.access_token);
+      toast.success("Pago corregido");
+      setEditandoPagoIdx(null);
+      // Actualiza el pago corregido y los totales de la cita en memoria (sin
+      // recargar) para verlo de inmediato en este mismo modal. Los
+      // `saldo_despues` de los pagos POSTERIORES a este no se recalculan acá
+      // — se corrigen solos cuando `onRefresh` vuelve a traer la cita completa.
+      setAppointmentDetails((prev: any) => {
+        if (!prev?.rawData?.historial_pagos) return prev;
+        const historial = [...prev.rawData.historial_pagos];
+        if (historial[indiceOriginal]) {
+          historial[indiceOriginal] = {
+            ...historial[indiceOriginal],
+            ...(cambios.metodo ? { metodo: cambios.metodo } : {}),
+            ...(cambios.monto !== undefined ? { monto: cambios.monto } : {}),
+            // Si el monto cambió, el backend puede haber recalculado el
+            // "tipo" (ej. un "Pago completo" que corregido a un monto menor
+            // pasa a ser "Abono inicial") — se refleja de inmediato acá.
+            ...(resultado?.tipo ? { tipo: resultado.tipo } : {}),
+          };
+        }
+        return {
+          ...prev,
+          rawData: {
+            ...prev.rawData,
+            historial_pagos: historial,
+            abono: resultado?.abono ?? prev.rawData.abono,
+            saldo_pendiente: resultado?.saldo_pendiente ?? prev.rawData.saldo_pendiente,
+            estado_pago: resultado?.estado_pago ?? prev.rawData.estado_pago,
+          },
+        };
+      });
+      if (onRefresh) {
+        setTimeout(() => onRefresh(), 300);
+      }
+    } catch (error: any) {
+      console.error("Error corrigiendo pago:", error);
+      toast.error(extraerMensajeError(error, "No se pudo corregir el pago"));
+    } finally {
+      setGuardandoMetodoPago(false);
     }
   };
 
@@ -3535,6 +3662,22 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                                       >
                                         {pago.fecha}
                                         {pago.metodo ? ` · ${pago.metodo}` : ""}
+                                        {metodoLower !== "giftcard" && metodoLower !== "saldo_a_favor" && editandoPagoIdx !== pago.indiceOriginal && (
+                                          citaYaFacturada ? (
+                                            <span className="ml-1.5" title="La cita ya fue facturada — el historial de pagos no se puede corregir para no quedar inconsistente con la factura emitida.">
+                                              (cita facturada)
+                                            </span>
+                                          ) : (
+                                            <button
+                                              type="button"
+                                              onClick={() => iniciarEdicionMetodoPago(pago.indiceOriginal, pago.metodo, pago.monto)}
+                                              className="ml-1.5 underline"
+                                              style={{ color: "#3B82F6" }}
+                                            >
+                                              Corregir
+                                            </button>
+                                          )
+                                        )}
                                       </p>
                                     </div>
                                     <CheckCircle
@@ -3542,6 +3685,48 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                                       style={{ color: iconColor }}
                                     />
                                   </div>
+
+                                  {editandoPagoIdx === pago.indiceOriginal && (
+                                    <div className="mt-2 pl-11 flex items-center gap-2 flex-wrap">
+                                      <select
+                                        value={metodoEditado}
+                                        onChange={(e) => setMetodoEditado(e.target.value)}
+                                        className="text-xs rounded-md px-2 py-1"
+                                        style={{ border: "1px solid #E2E8F0" }}
+                                      >
+                                        {PAYMENT_METHOD_OPTIONS.filter((m) => m.id !== "giftcard").map((m) => (
+                                          <option key={m.id} value={m.id}>{m.label}</option>
+                                        ))}
+                                      </select>
+                                      <input
+                                        type="number"
+                                        min="0.01"
+                                        step="0.01"
+                                        value={montoEditado}
+                                        onChange={(e) => setMontoEditado(e.target.value)}
+                                        className="text-xs rounded-md px-2 py-1 w-24"
+                                        style={{ border: "1px solid #E2E8F0" }}
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={guardandoMetodoPago}
+                                        onClick={() => handleGuardarMetodoPago(pago.indiceOriginal)}
+                                        className="text-xs font-semibold px-2 py-1 rounded-md text-white disabled:opacity-50"
+                                        style={{ background: "#1E293B" }}
+                                      >
+                                        {guardandoMetodoPago ? "..." : "Guardar"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditandoPagoIdx(null)}
+                                        className="text-xs px-2 py-1"
+                                        style={{ color: "#64748B" }}
+                                      >
+                                        Cancelar
+                                      </button>
+                                    </div>
+                                  )}
+
                                   {(pago.registradoPor ||
                                     pago.saldoDespues != null ||
                                     pago.notas ||
@@ -3780,6 +3965,21 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                         Cancelar cita
                       </button>
                     </>
+                  )}
+
+                  {ESTADOS_ELIMINABLES.includes((appointmentDetails?.estado || "").toLowerCase()) && (
+                    <button
+                      onClick={handleEliminarCita}
+                      disabled={updating}
+                      className="flex-1 flex items-center justify-center py-3 rounded-xl text-sm font-semibold disabled:opacity-50"
+                      style={{
+                        border: "1px solid #FCA5A5",
+                        color: "#EF4444",
+                        background: "#FEF2F2",
+                      }}
+                    >
+                      Eliminar cita
+                    </button>
                   )}
                 </div>
               </>

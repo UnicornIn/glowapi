@@ -183,7 +183,7 @@ const Bloqueos: React.FC<BloqueosProps> = ({
           // Si no encontramos al estilista por email, mostrar mensaje
           console.warn("No se encontró el perfil de estilista para el usuario:", user.email);
           setEstilistas([]);
-          setMensaje("❌ No se encontró tu perfil de estilista. Contacta al administrador.");
+          setMensaje("❌ No se encontró tu perfil de profesional. Contacta al administrador.");
         }
       }
       // Si hay un estilistaId específico, mostrarlo primero
@@ -282,13 +282,13 @@ const Bloqueos: React.FC<BloqueosProps> = ({
 
   const handleInputChange = useCallback((field: string, value: any) => {
     if (isEditing && (field === "sede_id" || field === "profesional_id" || field === "fecha")) {
-      setMensaje("❌ En edición no puedes cambiar sede, estilista o fecha");
+      setMensaje("❌ En edición no puedes cambiar sede, profesional o fecha");
       return;
     }
 
     // Si hay estilistaId o el usuario es estilista, no permitir cambiar sede ni profesional
     if ((estilistaId || esEstilista) && (field === 'sede_id' || field === 'profesional_id')) {
-      setMensaje("❌ No puedes cambiar la sede o estilista en este modo");
+      setMensaje("❌ No puedes cambiar la sede o profesional en este modo");
       return;
     }
     
@@ -343,7 +343,7 @@ const Bloqueos: React.FC<BloqueosProps> = ({
 
     // Validaciones básicas
     if (!formData.profesional_id.trim()) {
-      setMensaje("❌ Debes seleccionar un estilista");
+      setMensaje("❌ Debes seleccionar un profesional");
       return;
     }
     if (!formData.sede_id.trim()) {
@@ -538,7 +538,7 @@ const Bloqueos: React.FC<BloqueosProps> = ({
     switch(user?.role) {
       case 'super_admin': return 'Super Admin';
       case 'admin_sede': return 'Admin Sede';
-      case 'estilista': return 'Estilista';
+      case 'estilista': return 'Profesional';
       default: return user?.role || 'Usuario';
     }
   };
@@ -601,7 +601,7 @@ const Bloqueos: React.FC<BloqueosProps> = ({
                 : createFromExisting
                   ? " Creando nuevo bloqueo superpuesto"
                 : estilistaId
-                  ? " Creando bloqueo para estilista específico"
+                  ? " Creando bloqueo para profesional específico"
                   : esEstilista
                     ? " Creando bloqueo para tu propio horario"
                     : ""}
@@ -644,7 +644,7 @@ const Bloqueos: React.FC<BloqueosProps> = ({
                     : esEstilista
                       ? "(Tu sede)"
                       : estilistaId
-                        ? "(Sede del estilista)"
+                        ? "(Sede del profesional)"
                         : "(Tu sede)"}
                 </span>
               </div>
@@ -673,17 +673,17 @@ const Bloqueos: React.FC<BloqueosProps> = ({
           )}
         </div>
 
-        {/* Estilista - Si hay estilistaId o es estilista, mostrar como read-only */}
+        {/* Profesional - Si hay estilistaId o es estilista, mostrar como read-only */}
         <div>
           <label className={fieldLabelClass}>
-            Estilista
+            Profesional
           </label>
           {estilistaId || esEstilista || isEditing ? (
             // Mostrar como read-only si se pasó estilistaId o el usuario es estilista
             <div className={readonlyControlClass}>
               <div className="flex items-center justify-between">
                 <span className={`${useCompactView ? "text-sm" : "text-gray-900"} font-medium`}>
-                  {nombreEstilistaActual || "Cargando estilista..."}
+                  {nombreEstilistaActual || "Cargando profesional..."}
                 </span>
                 <span className={`${useCompactView ? "text-[11px]" : "text-xs"} text-gray-600`}>
                   {isEditing ? "(No editable)" : esEstilista ? "(Tú)" : "(Pre-seleccionado)"}
@@ -705,9 +705,9 @@ const Bloqueos: React.FC<BloqueosProps> = ({
               disabled={!formData.sede_id || loadingEstilistas}
             >
               <option value="">
-                {loadingEstilistas ? "Cargando estilistas..." : 
-                 !formData.sede_id ? "Primero selecciona una sede" : 
-                 "Seleccionar estilista"}
+                {loadingEstilistas ? "Cargando profesionales..." :
+                 !formData.sede_id ? "Primero selecciona una sede" :
+                 "Seleccionar profesional"}
               </option>
               {estilistas.map(estilista => (
                 <option key={estilista.profesional_id} value={estilista.profesional_id}>
@@ -718,7 +718,7 @@ const Bloqueos: React.FC<BloqueosProps> = ({
           )}
           {estilistas.length === 0 && formData.sede_id && !loadingEstilistas && !estilistaId && !esEstilista && !isEditing && (
             <p className="mt-1 text-sm text-gray-800">
-              No hay estilistas disponibles en esta sede
+              No hay profesionales disponibles en esta sede
             </p>
           )}
         </div>
