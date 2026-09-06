@@ -124,6 +124,9 @@ async def create_profesional(
         print("❌ Usuario NO autorizado para crear profesionales")
         raise HTTPException(status_code=403, detail="No autorizado")
 
+    if not profesional.password or not profesional.password.strip():
+        raise HTTPException(status_code=400, detail="La contraseña es obligatoria para crear un profesional")
+
     # --- Sede viene en el modelo ---
     sede_id = profesional.sede_id
     print("🏢 Sede recibida:", sede_id)
@@ -545,14 +548,20 @@ async def update_professional(
 
     # Preparar datos a actualizar
     update_data = {k: v for k, v in data.dict().items() if v is not None}
-    
+
     # No permitir cambiar profesional_id ni rol
     update_data.pop("profesional_id", None)
     update_data.pop("rol", None)
-    
+
+    # La contraseña NUNCA se guarda en collection_estilista (no es donde vive
+    # el login real, y quedaría en texto plano). Si vino una nueva, se hashea
+    # y se aplica aparte sobre collection_auth, más abajo. Si no vino (el admin
+    # dejó el campo vacío), no se toca la contraseña actual del profesional.
+    nueva_password = update_data.pop("password", None)
+
     # ⭐ Asegurar que especialidades es True (nueva lógica)
     update_data["especialidades"] = True
-    
+
     update_data["updated_at"] = datetime.now()
     update_data["updated_by"] = current_user["email"]
 
@@ -594,11 +603,24 @@ async def update_professional(
             }}
         )
 
+    password_actualizada = False
+    if nueva_password and nueva_password.strip():
+        hashed_password = pwd_context.hash(nueva_password.strip())
+        auth_result = await collection_auth.update_one(
+            {"profesional_id": profesional_id},
+            {"$set": {
+                "hashed_password": hashed_password,
+                "updated_at": datetime.now(),
+            }}
+        )
+        password_actualizada = auth_result.matched_count > 0
+
     return {
         "msg": "✅ Profesional actualizado correctamente",
         "profesional_id": profesional_id,
         "especialidades": True,
-        "servicios_no_presta_actualizados": len(update_data.get("servicios_no_presta", []))
+        "servicios_no_presta_actualizados": len(update_data.get("servicios_no_presta", [])),
+        "password_actualizada": password_actualizada,
     }
 
 # ===================================================

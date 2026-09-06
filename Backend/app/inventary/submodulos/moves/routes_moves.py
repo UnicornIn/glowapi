@@ -6,10 +6,13 @@ from app.database.mongo import (
     collection_productos,
     collection_locales,
 )
+from app.inventary.submodulos.moves.models import Traslado
 from app.auth.routes import get_current_user
 from app.utils.fecha_parser import resolver_rango
+from app.utils.timezone import today
 from typing import Optional, List
 from datetime import datetime, timedelta
+from bson import ObjectId
 
 router = APIRouter(prefix="/movimientos")
 
@@ -293,3 +296,188 @@ async def productos_sin_movimiento(
         })
 
     return sorted(result, key=lambda x: x["stock_actual"], reverse=True)
+
+
+# =========================================================
+# 🔀 POST /movimientos/traslado — trasladar stock entre sedes
+# =========================================================
+@router.post("/traslado", response_model=dict)
+async def crear_traslado(
+    traslado: Traslado,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Traslada stock de uno o varios productos de una sede a otra.
+
+    No corre dentro de una transacción de Mongo (ningún otro endpoint de
+    inventario de este proyecto la usa), pero valida TODO antes de mutar
+    nada: si un item del traslado falla, no se aplica ningún cambio.
+
+    Registra el movimiento como dos entradas normales en inventory_reports
+    (una "salida" en la sede origen, una "entrada" en la sede destino),
+    ligadas por un `traslado_id` compartido — así se reutiliza el listado
+    y el historial que ya existen (GET /movimientos, kardex por sede) sin
+    tener que enseñarles un tipo de documento nuevo.
+    """
+    rol = current_user.get("rol")
+    if rol not in ["admin_sede", "super_admin"]:
+        raise HTTPException(status_code=403, detail="No autorizado para trasladar stock")
+
+    data = traslado.dict()
+
+    if rol == "admin_sede":
+        user_sede_id = current_user.get("sede_id")
+        if not user_sede_id:
+            raise HTTPException(status_code=403, detail="Usuario sin sede asignada")
+        data["sede_origen"] = user_sede_id
+    elif not data.get("sede_origen"):
+        raise HTTPException(status_code=400, detail="Debe especificar sede_origen")
+
+    if data["sede_origen"] == data["sede_destino"]:
+        raise HTTPException(status_code=400, detail="La sede destino debe ser distinta de la sede origen")
+
+    if not traslado.items:
+        raise HTTPException(status_code=400, detail="Debe incluir al menos un producto")
+
+    sede_origen_doc = await collection_locales.find_one({"id": data["sede_origen"]})
+    if not sede_origen_doc:
+        raise HTTPException(status_code=404, detail=f"Sede origen '{data['sede_origen']}' no encontrada")
+    sede_destino_doc = await collection_locales.find_one({"id": data["sede_destino"]})
+    if not sede_destino_doc:
+        raise HTTPException(status_code=404, detail=f"Sede destino '{data['sede_destino']}' no encontrada")
+
+    fecha_actual = today(sede_origen_doc).replace(tzinfo=None) if sede_origen_doc else datetime.now()
+
+    # ── Pasada 1: validar todo sin mutar nada ──────────────────────────────
+    plan = []
+    for item in traslado.items:
+        if item.cantidad <= 0:
+            raise HTTPException(status_code=400, detail=f"Cantidad debe ser positiva para {item.producto_id}")
+
+        producto = await collection_productos.find_one({"id": item.producto_id})
+        if not producto:
+            raise HTTPException(status_code=404, detail=f"Producto {item.producto_id} no encontrado en catálogo")
+
+        inv_origen = await collection_inventarios.find_one(
+            {"producto_id": item.producto_id, "sede_id": data["sede_origen"]}
+        )
+        if not inv_origen:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No existe inventario de '{producto['nombre']}' en la sede origen",
+            )
+        if inv_origen["stock_actual"] < item.cantidad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Stock insuficiente de '{producto['nombre']}' en sede origen (disponible: {inv_origen['stock_actual']})",
+            )
+
+        inv_destino = await collection_inventarios.find_one(
+            {"producto_id": item.producto_id, "sede_id": data["sede_destino"]}
+        )
+
+        plan.append({
+            "producto_id": item.producto_id,
+            "nombre_producto": producto["nombre"],
+            "cantidad": item.cantidad,
+            "inv_origen": inv_origen,
+            "inv_destino": inv_destino,
+        })
+
+    # ── Pasada 2: aplicar los cambios ───────────────────────────────────────
+    traslado_id = str(ObjectId())
+    items_reporte_origen = []
+    items_reporte_destino = []
+
+    for p in plan:
+        cantidad = p["cantidad"]
+        inv_origen = p["inv_origen"]
+        inv_destino = p["inv_destino"]
+
+        stock_origen_anterior = inv_origen["stock_actual"]
+        stock_origen_nuevo = stock_origen_anterior - cantidad
+        await collection_inventarios.update_one(
+            {"_id": inv_origen["_id"]},
+            {"$set": {"stock_actual": stock_origen_nuevo, "fecha_ultima_actualizacion": fecha_actual}},
+        )
+
+        if inv_destino:
+            stock_destino_anterior = inv_destino["stock_actual"]
+            stock_destino_nuevo = stock_destino_anterior + cantidad
+            await collection_inventarios.update_one(
+                {"_id": inv_destino["_id"]},
+                {"$set": {"stock_actual": stock_destino_nuevo, "fecha_ultima_actualizacion": fecha_actual}},
+            )
+        else:
+            # La sede destino nunca tuvo este producto asignado — se crea el
+            # registro de inventario ahí mismo (mismo stock_minimo que traía
+            # en origen, como default razonable) en vez de obligar a un paso
+            # manual previo de "asignar producto a la sede".
+            stock_destino_anterior = 0
+            stock_destino_nuevo = cantidad
+            await collection_inventarios.insert_one({
+                "nombre": p["nombre_producto"],
+                "producto_id": p["producto_id"],
+                "sede_id": data["sede_destino"],
+                "stock_actual": stock_destino_nuevo,
+                "stock_minimo": inv_origen.get("stock_minimo", 0),
+                "comision": None,
+                "fecha_creacion": fecha_actual,
+                "fecha_ultima_actualizacion": fecha_actual,
+                "creado_por": current_user["email"],
+            })
+
+        items_reporte_origen.append({
+            "producto_id": p["producto_id"],
+            "nombre_producto": p["nombre_producto"],
+            "cantidad": cantidad,
+            "stock_anterior": stock_origen_anterior,
+            "stock_nuevo": stock_origen_nuevo,
+        })
+        items_reporte_destino.append({
+            "producto_id": p["producto_id"],
+            "nombre_producto": p["nombre_producto"],
+            "cantidad": cantidad,
+            "stock_anterior": stock_destino_anterior,
+            "stock_nuevo": stock_destino_nuevo,
+        })
+
+        print(
+            f"🔀 TRASLADO: {p['nombre_producto']} x{cantidad} — "
+            f"{data['sede_origen']} ({stock_origen_anterior}→{stock_origen_nuevo}) → "
+            f"{data['sede_destino']} ({stock_destino_anterior}→{stock_destino_nuevo})"
+        )
+
+    reporte_salida = {
+        "tipo": "salida",
+        "sede_id": data["sede_origen"],
+        "motivo": f"Traslado a {sede_destino_doc.get('nombre', data['sede_destino'])}",
+        "observaciones": data.get("observaciones"),
+        "items": items_reporte_origen,
+        "fecha": fecha_actual,
+        "creado_por": current_user["email"],
+        "traslado_id": traslado_id,
+        "sede_relacionada": data["sede_destino"],
+    }
+    reporte_entrada = {
+        "tipo": "entrada",
+        "sede_id": data["sede_destino"],
+        "motivo": f"Traslado desde {sede_origen_doc.get('nombre', data['sede_origen'])}",
+        "observaciones": data.get("observaciones"),
+        "items": items_reporte_destino,
+        "fecha": fecha_actual,
+        "creado_por": current_user["email"],
+        "traslado_id": traslado_id,
+        "sede_relacionada": data["sede_origen"],
+    }
+    await collection_inventory_reports.insert_many([reporte_salida, reporte_entrada])
+
+    print(f"✅ EVENTO: traslado.created -> {traslado_id} ({data['sede_origen']} → {data['sede_destino']})")
+
+    return {
+        "msg": "Traslado registrado exitosamente",
+        "traslado_id": traslado_id,
+        "sede_origen": data["sede_origen"],
+        "sede_destino": data["sede_destino"],
+        "items": items_reporte_origen,
+    }

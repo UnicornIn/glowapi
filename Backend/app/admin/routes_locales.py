@@ -146,6 +146,36 @@ async def listar_locales(
 
 
 # ================================================
+# 📋 Opciones de sede (id + nombre, todas las sedes activas)
+# ================================================
+@router.get("/opciones/lista", response_model=list)
+async def listar_opciones_sede(current_user: dict = Depends(get_current_user)):
+    """
+    Versión mínima de /admin/locales/ (solo id + nombre) para poblar
+    selectores donde hace falta ver TODAS las sedes sin importar el rol —
+    ej. elegir la sede destino de un traslado de stock. `listar_locales`
+    no sirve para esto porque a admin_sede solo le devuelve su propia sede.
+
+    A diferencia de /admin/locales/, esta no filtra por rol: cualquier
+    usuario autenticado con rol admin_sede o super_admin puede ver la
+    lista completa de sedes activas (solo id + nombre, sin datos de
+    contacto ni configuración).
+    """
+    rol = current_user.get("rol")
+    if rol not in ["admin_sede", "super_admin"]:
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    sedes = await collection_locales.find(
+        {"activa": True}, {"sede_id": 1, "nombre": 1}
+    ).to_list(None)
+
+    return [
+        {"sede_id": s.get("sede_id") or str(s["_id"]), "nombre": s.get("nombre", "")}
+        for s in sedes
+    ]
+
+
+# ================================================
 # 🔍 Get Local by sede_id
 # ================================================
 @router.get("/{sede_id}", response_model=dict)
