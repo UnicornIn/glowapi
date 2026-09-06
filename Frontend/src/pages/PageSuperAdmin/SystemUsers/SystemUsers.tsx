@@ -24,7 +24,7 @@ const roleLabels: Record<string, string> = {
   admin_sede: "admin_sede",
   recepcionista: "recepcionista",
   call_center: "call_center",
-  estilista: "estilista",
+  estilista: "Profesional",
 };
 
 const normalizeRoleKey = (role: string) => role.trim().toLowerCase().replace(/[\s-]+/g, "_");
