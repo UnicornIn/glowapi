@@ -67,7 +67,7 @@ export function ComisionesFilters() {
           onValueChange={setEstilistaSeleccionado}
         >
           <SelectContent>
-            <SelectItem value="todos">Todos los estilistas</SelectItem>
+            <SelectItem value="todos">Todos los profesionales</SelectItem>
             {estilistas.length > 0 ? (
               estilistas.map((estilista) => (
                 <SelectItem key={estilista.id} value={estilista.id}>
@@ -76,7 +76,7 @@ export function ComisionesFilters() {
               ))
             ) : (
               <SelectItem value="sin-datos" disabled>
-                No hay estilistas disponibles
+                No hay profesionales disponibles
               </SelectItem>
             )}
           </SelectContent>

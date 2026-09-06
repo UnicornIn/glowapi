@@ -162,20 +162,20 @@ export function ComisionesFilters({ onFiltersChange }: ComisionesFiltersProps) {
           onValueChange={setEstilistaSeleccionado}
         >
           <SelectTrigger className="w-full bg-white border-gray-300 text-gray-900 hover:bg-gray-50">
-            <SelectValue placeholder="Selecciona un estilista *" />
+            <SelectValue placeholder="Selecciona un profesional *" />
           </SelectTrigger>
           <SelectContent className="bg-white border-gray-300">
             <SelectItem value="placeholder" className="bg-white hover:bg-gray-100 text-gray-900">
-              -- Selecciona un estilista --
+              -- Selecciona un profesional --
             </SelectItem>
             {cargandoEstilistas ? (
               <SelectItem value="cargando" disabled className="bg-white text-gray-500">
-                Cargando estilistas...
+                Cargando profesionales...
               </SelectItem>
             ) : estilistas.length > 0 ? (
               estilistas.map((estilista) => (
-                <SelectItem 
-                  key={estilista.profesional_id} 
+                <SelectItem
+                  key={estilista.profesional_id}
                   value={estilista.profesional_id}
                   className="bg-white hover:bg-gray-100 text-gray-900"
                 >
@@ -184,7 +184,7 @@ export function ComisionesFilters({ onFiltersChange }: ComisionesFiltersProps) {
               ))
             ) : (
               <SelectItem value="sin-datos" disabled className="bg-white text-gray-500">
-                No hay estilistas disponibles
+                No hay profesionales disponibles
               </SelectItem>
             )}
           </SelectContent>

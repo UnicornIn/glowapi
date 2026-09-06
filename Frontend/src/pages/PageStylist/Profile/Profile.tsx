@@ -108,7 +108,11 @@ export default function StylistProfilePage() {
                   {user?.name || "Tu perfil"}
                 </p>
                 <p className="text-sm text-gray-500">
-                  {user?.role ? user.role.toString().toLowerCase() : "Estilista"}
+                  {user?.role
+                    ? user.role.toString().toLowerCase() === "estilista"
+                      ? "profesional"
+                      : user.role.toString().toLowerCase()
+                    : "Profesional"}
                 </p>
               </div>
             </div>
