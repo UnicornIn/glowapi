@@ -323,6 +323,25 @@ export class FacturaService {
     }
   }
 
+  async anularFactura(
+    venta_id: string,
+    motivo?: string,
+  ): Promise<{ success: boolean; message: string; reversiones: Record<string, unknown> }> {
+    const url = `${API_BASE_URL}api/billing/sales/${encodeURIComponent(venta_id)}/anular`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: this.getHeaders(),
+      body: JSON.stringify({ motivo: motivo || null }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      throw new Error(errorData?.detail || `Error ${response.status}: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
   // Obtener facturas de un cliente específico
   async getFacturasCliente(cliente_id: string): Promise<FacturaConverted[]> {
     try {

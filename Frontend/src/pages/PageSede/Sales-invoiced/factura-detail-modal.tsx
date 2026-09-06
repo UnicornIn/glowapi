@@ -1,19 +1,71 @@
 "use client"
 
 import type React from "react"
-import { X, FileText, User, CreditCard, Calendar, CheckCircle, Clock, Package, Scissors, DollarSign, ListChecks } from "lucide-react"
+import { useState } from "react"
+import { toast } from "sonner"
+import { X, FileText, User, CreditCard, Calendar, CheckCircle, Clock, Package, Scissors, DollarSign, ListChecks, Ban } from "lucide-react"
 import { Dialog, DialogContent, DialogTitle } from "../../../components/ui/dialog"
 import { Button } from "../../../components/ui/button"
+import { confirmAction } from "../../../components/ui/confirm-dialog"
+import { useAuth } from "../../../components/Auth/AuthContext"
 import type { Factura } from "../../../types/factura"
 import { formatDateDMY } from "../../../lib/dateFormat"
+import { facturaService } from "./facturas"
 
 interface FacturaDetailModalProps {
   factura: Factura
   open: boolean
   onOpenChange: (open: boolean) => void
+  // Se llama tras anular con éxito, para que la lista/resumen de facturas
+  // se refresque — la factura anulada ya no debe seguir contando como
+  // "facturada" en los totales.
+  onAnulada?: () => void
 }
 
-export function FacturaDetailModal({ factura, open, onOpenChange }: FacturaDetailModalProps) {
+export function FacturaDetailModal({ factura, open, onOpenChange, onAnulada }: FacturaDetailModalProps) {
+  const { user } = useAuth()
+  const [anulando, setAnulando] = useState(false)
+  const puedeAnular =
+    (user?.role === "admin_sede" || user?.role === "super_admin") &&
+    factura.estado !== "anulado" &&
+    Boolean(factura.venta_id)
+
+  const handleAnularFactura = async () => {
+    if (!factura.venta_id) return
+
+    const confirmed = await confirmAction({
+      title: "Anular factura",
+      message:
+        "Esto anula la factura, revierte el inventario/comisiones/giftcard asociados, y devuelve la cita a 'Finalizado' para que puedas corregir el servicio o el historial de pago antes de volver a facturar. No se puede deshacer.",
+      confirmLabel: "Sí, anular",
+      variant: "danger",
+    })
+    if (!confirmed) return
+
+    // `window.prompt` puede no estar soportado en algunos contextos (webviews
+    // embebidos, ciertos navegadores móviles) y ahí lanza en vez de devolver
+    // null — el motivo es opcional, así que no debe tumbar la anulación.
+    let motivo: string | undefined
+    try {
+      motivo = window.prompt("Motivo de la anulación (opcional):") || undefined
+    } catch {
+      motivo = undefined
+    }
+
+    setAnulando(true)
+    try {
+      await facturaService.anularFactura(factura.venta_id, motivo)
+      toast.success("Factura anulada correctamente")
+      onOpenChange(false)
+      onAnulada?.()
+    } catch (error) {
+      const mensaje = error instanceof Error ? error.message : "No se pudo anular la factura"
+      toast.error(mensaje)
+    } finally {
+      setAnulando(false)
+    }
+  }
+
   // Imprimir factura en la misma página (ventana de impresión)
   const handlePrintFactura = () => {
     // Crear HTML simple para la factura
@@ -414,13 +466,24 @@ export function FacturaDetailModal({ factura, open, onOpenChange }: FacturaDetai
               </div>
             </div>
             <div className="flex gap-3">
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 onClick={() => onOpenChange(false)}
                 className="border-gray-300 text-gray-700 hover:bg-gray-50 bg-white"
               >
                 Cerrar
               </Button>
+              {puedeAnular && (
+                <Button
+                  variant="outline"
+                  onClick={handleAnularFactura}
+                  disabled={anulando}
+                  className="border-red-300 text-red-600 hover:bg-red-50 bg-white disabled:opacity-50"
+                >
+                  <Ban className="mr-2 h-4 w-4" />
+                  {anulando ? "Anulando..." : "Anular factura"}
+                </Button>
+              )}
               <Button className="bg-gray-900 hover:bg-gray-800 text-white" onClick={handlePrintFactura}>
                 <FileText className="mr-2 h-4 w-4" />
                 Imprimir factura

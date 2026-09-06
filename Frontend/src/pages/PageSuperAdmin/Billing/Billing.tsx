@@ -7,6 +7,7 @@ import { Button } from "../../../components/ui/button"
 import { Skeleton } from "../../../components/ui/skeleton"
 import { FacturaDetailModal } from "../../PageSede/Sales-invoiced/factura-detail-modal"
 import { DirectSaleModal } from "../../PageSede/Billing/DirectSaleModal"
+import { ServiceProtocol } from "../../PageSede/Billing/service-protocol"
 import type { Factura } from "../../../types/factura"
 import { DEFAULT_PERIOD } from "../../../lib/period"
 import { features } from "../../../config/features"
@@ -159,6 +160,7 @@ export default function SuperAdminBilling() {
   const [allAppointments, setAllAppointments] = useState<Appointment[]>([])
   const [loadingAppointments, setLoadingAppointments] = useState(true)
   const [errorAppointments, setErrorAppointments] = useState<string | null>(null)
+  const [selectedAppointment, setSelectedAppointment] = useState<Appointment | null>(null)
 
   const [metrics, setMetrics] = useState({ ventas_totales: 0, ventas_servicios: 0, ventas_productos: 0 })
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethodTotals>({
@@ -371,6 +373,16 @@ export default function SuperAdminBilling() {
       })
   }, [cachedFacturas, allAppointments])
 
+  // Close panel if selected appointment is filtered out by period change
+  useEffect(() => {
+    if (
+      selectedAppointment &&
+      !allAppointments.find((a) => a._id === selectedAppointment._id)
+    ) {
+      setSelectedAppointment(null)
+    }
+  }, [allAppointments, selectedAppointment])
+
   const filteredAppointments = useMemo(() => {
     let result: Appointment[]
     if (filterStatus === "pendientes") {
@@ -489,6 +501,10 @@ export default function SuperAdminBilling() {
           factura={selectedFactura}
           open={showFacturaModal}
           onOpenChange={(open) => { setShowFacturaModal(open); if (!open) setSelectedFactura(null) }}
+          onAnulada={() => {
+            fetchAppointments()
+            fetchFacturasForRange()
+          }}
         />
       )}
 
@@ -617,7 +633,7 @@ export default function SuperAdminBilling() {
               {/* Column headers */}
               <div className="flex items-center gap-3 px-3.5 mb-1">
                 <div className="w-8 flex-shrink-0" />
-                <span className="flex-1 text-[9px] font-bold uppercase tracking-[0.5px] text-gray-400">Cliente / Estilista o Vendedor · Servicio o Producto</span>
+                <span className="flex-1 text-[9px] font-bold uppercase tracking-[0.5px] text-gray-400">Cliente / Profesional o Vendedor · Servicio o Producto</span>
                 {selectedSedeId === "todas" && (
                   <span className="hidden sm:block w-28 text-center text-[9px] font-bold uppercase tracking-[0.5px] text-gray-400">Sede</span>
                 )}
@@ -646,6 +662,7 @@ export default function SuperAdminBilling() {
               ) : (
                 <div>
                   {filteredAppointments.map((a) => {
+                    const isSelected = selectedAppointment?._id === a._id
                     const stylistName = a.profesional_nombre || a.estilista || "—"
                     const clientName = (a.cliente_nombre || a.cliente || "").split(" ").slice(0, 2).join(" ")
                     const serviceName = a.servicio_nombre || a.servicio || "—"
@@ -654,7 +671,10 @@ export default function SuperAdminBilling() {
                     return (
                       <div
                         key={a._id}
-                        className="flex items-center px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors gap-3 mb-0.5 hover:bg-gray-50"
+                        onClick={() => setSelectedAppointment(a)}
+                        className={`flex items-center px-3.5 py-2.5 rounded-lg cursor-pointer transition-colors gap-3 mb-0.5 ${
+                          isSelected ? "bg-gray-100" : "hover:bg-gray-50"
+                        }`}
                       >
                         <div className="w-8 h-8 rounded-full bg-gray-900 flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">
                           {getInitials(clientName || stylistName)}
@@ -719,6 +739,44 @@ export default function SuperAdminBilling() {
                 <b className="text-gray-700">{stats.facturadas}</b> facturadas
               </div>
             </div>
+          </div>
+
+          {/* ── Detail panel (slides in from right) ──────────────────────────── */}
+          <div
+            className={`flex-shrink-0 transition-all duration-200 border-gray-200 overflow-hidden ${
+              selectedAppointment ? "w-full sm:w-[440px] border-l" : "w-0 border-0"
+            }`}
+          >
+            {selectedAppointment && (
+              <div className="w-full sm:w-[440px] h-full overflow-y-auto">
+                <ServiceProtocol
+                  selectedAppointment={selectedAppointment}
+                  onClose={() => setSelectedAppointment(null)}
+                  onAppointmentUpdated={(updated) => {
+                    if (updated.estado_factura?.toLowerCase() === "facturado") {
+                      // Cita completamente facturada: actualizar en lista (aparecerá en tab Facturadas)
+                      setAllAppointments((prev) =>
+                        prev.map((a) =>
+                          a._id === updated._id ? { ...a, ...updated } : a,
+                        ),
+                      )
+                      setSelectedAppointment(null)
+                    } else {
+                      setAllAppointments((prev) =>
+                        prev.map((a) =>
+                          a._id === updated._id ? { ...a, ...updated } : a,
+                        ),
+                      )
+                      setSelectedAppointment((prev) =>
+                        prev?._id === updated._id
+                          ? { ...prev, ...updated }
+                          : prev,
+                      )
+                    }
+                  }}
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>

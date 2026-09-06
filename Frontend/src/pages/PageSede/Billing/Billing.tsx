@@ -612,6 +612,10 @@ export default function Billing() {
             setShowFacturaModal(open)
             if (!open) setSelectedFactura(null)
           }}
+          onAnulada={() => {
+            fetchAppointments()
+            fetchFacturasForRange()
+          }}
         />
       )}
 
@@ -786,7 +790,7 @@ export default function Billing() {
             <div className="flex items-center gap-3 px-3.5 mb-1">
               <div className="w-8 flex-shrink-0" />
               <span className="flex-1 text-[9px] font-bold uppercase tracking-[0.5px] text-gray-400">
-                Cliente / Estilista o Vendedor · Servicio o Producto
+                Cliente / Profesional o Vendedor · Servicio o Producto
               </span>
               <span className="w-24 text-center text-[9px] font-bold uppercase tracking-[0.5px] text-gray-400">
                 Pago
