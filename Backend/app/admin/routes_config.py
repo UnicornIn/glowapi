@@ -42,6 +42,12 @@ class BusinessConfig(BaseModel):
     footer_legal: Optional[str] = None
     email_recomendaciones: Optional[List[str]] = None   # tips en los correos al cliente
     ws_url: Optional[str] = None          # solo clientes con mensajería (WebSocket)
+    # Interruptor general de correos salientes (confirmaciones de cita, envío
+    # de fichas en PDF, etc.) — ver enviar_correo/enviar_correo_con_pdf en
+    # quotes/controllers.py, que son el único punto donde se manda SMTP real
+    # en todo el backend. Pensado para poder frenar el envío mientras se
+    # confirma cuál va a ser el correo remitente real del negocio.
+    emails_habilitados: Optional[bool] = True
 
 
 class BusinessConfigPatch(BaseModel):
@@ -54,6 +60,7 @@ class BusinessConfigPatch(BaseModel):
     footer_legal: Optional[str] = None
     email_recomendaciones: Optional[List[str]] = None
     ws_url: Optional[str] = None
+    emails_habilitados: Optional[bool] = None
 
 
 @router_config.get("/public/business-config")

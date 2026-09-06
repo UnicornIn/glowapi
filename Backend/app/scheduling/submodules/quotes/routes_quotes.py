@@ -58,6 +58,9 @@ async def enviar_correo(destinatario: str, asunto: str, mensaje: str):
     try:
         from app.utils.branding import get_config
         _cfg = await get_config()
+        if not _cfg.get("emails_habilitados", True):
+            print(f"📭 Envío de correos desactivado (business_config.emails_habilitados=false) — se omite el correo a {destinatario}")
+            return
         msg = EmailMessage()
         msg["Subject"] = asunto
         msg["From"] = formataddr((_cfg.get("nombre_negocio", "GlowUp"), EMAIL_SENDER))
