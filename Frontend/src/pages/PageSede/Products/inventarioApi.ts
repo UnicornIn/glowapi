@@ -79,6 +79,29 @@ export interface SalidaHistorial {
   creado_por: string;
 }
 
+// ─── Traslados ──────────────────────────────────────────────────────────────
+
+export interface CrearTrasladoBody {
+  sede_origen?: string;
+  sede_destino: string;
+  items: EntradaItem[];
+  observaciones?: string;
+}
+
+export interface TrasladoRespuesta {
+  msg: string;
+  traslado_id: string;
+  sede_origen: string;
+  sede_destino: string;
+  items: Array<{
+    producto_id: string;
+    nombre_producto: string;
+    cantidad: number;
+    stock_anterior: number;
+    stock_nuevo: number;
+  }>;
+}
+
 // ─── Movimientos ──────────────────────────────────────────────────────────────
 
 export interface Movimiento {
@@ -147,12 +170,27 @@ export interface AlertaStockBajo {
 
 export interface CatalogoProducto {
   _id: string;
+  /** ID legible tipo "P007" — el que espera el resto de endpoints (inventario, etc). */
+  id?: string;
   nombre: string;
   codigo: string;
   categoria?: string;
   descripcion?: string;
-  activo?: boolean;
+  comision?: number;
+  stock_actual?: number;
+  stock_minimo?: number;
   precios?: { COP?: number; MXN?: number; USD?: number };
+}
+
+export interface CrearProductoCatalogoBody {
+  nombre: string;
+  codigo?: string;
+  descripcion?: string;
+  categoria?: string;
+  comision?: number;
+  precios: { COP?: number; MXN?: number; USD?: number };
+  stock_actual?: number;
+  stock_minimo?: number;
 }
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
@@ -247,6 +285,50 @@ export async function getSalidas(
   if (!res.ok) throw new Error(await parseApiError(res));
   const data: unknown = await res.json();
   return Array.isArray(data) ? (data as SalidaHistorial[]) : [];
+}
+
+// ─── Sedes (opciones para el selector de traslado) ───────────────────────────
+
+export interface SedeOpcion {
+  sede_id: string;
+  nombre: string;
+}
+
+/**
+ * Lista mínima (id + nombre) de todas las sedes activas, sin importar el rol
+ * de quien pregunta — a diferencia de `GET /admin/locales/`, que a un
+ * admin_sede solo le devuelve su propia sede. Sirve para poblar el selector
+ * de "sede destino" al trasladar stock.
+ */
+export async function getSedeOpciones(token: string): Promise<SedeOpcion[]> {
+  const res = await fetch(`${API_BASE_URL}admin/locales/opciones/lista`, {
+    headers: buildHeaders(token),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res));
+  const data: unknown = await res.json();
+  return Array.isArray(data) ? (data as SedeOpcion[]) : [];
+}
+
+// ─── Traslados API ────────────────────────────────────────────────────────────
+
+/**
+ * Traslada stock de un producto (o varios) de una sede a otra en una sola
+ * llamada — POST /inventary/movimientos/traslado. `sede_origen` se ignora
+ * en el backend si quien llama es `admin_sede` (se fuerza a su propia sede).
+ * Si la sede destino nunca tuvo este producto asignado, el backend crea el
+ * registro de inventario ahí mismo — no hace falta "asignar" primero.
+ */
+export async function crearTraslado(
+  token: string,
+  body: CrearTrasladoBody
+): Promise<TrasladoRespuesta> {
+  const res = await fetch(`${API_BASE_URL}inventary/movimientos/traslado`, {
+    method: "POST",
+    headers: buildHeaders(token, true),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json();
 }
 
 // ─── Movimientos API ──────────────────────────────────────────────────────────
@@ -365,9 +447,38 @@ export async function getCatalogoProductos(
   return items as CatalogoProducto[];
 }
 
+/**
+ * Trae UN producto del catálogo por su id legible ("P007") o su `_id` de
+ * Mongo — el backend acepta ambos acá (a diferencia de PUT/DELETE, que solo
+ * aceptan `_id`). Útil antes de editar/eliminar: la tabla de inventario por
+ * sede solo tiene el id legible, así que primero se resuelve el `_id` real
+ * con esta función.
+ */
+export async function obtenerProductoCatalogo(
+  token: string,
+  id: string
+): Promise<CatalogoProducto> {
+  const res = await fetch(`${API_BASE_URL}inventary/product/productos/${id}`, {
+    headers: buildHeaders(token),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res));
+  return res.json();
+}
+
+/**
+ * Crea un producto NUEVO en el catálogo maestro (no confundir con asignar
+ * inventario de un producto ya existente a una sede — eso es
+ * `InventarioService.crearInventario` en inventario.ts).
+ * Solo super_admin puede llamar este endpoint — el backend devuelve 403 para
+ * cualquier otro rol.
+ *
+ * El backend responde `{ msg, producto }`, no el producto directo — de ahí
+ * el `.producto` al final (la versión anterior de esta función asumía mal la
+ * forma de la respuesta y nunca se detectó porque no tenía ningún caller).
+ */
 export async function crearProductoCatalogo(
   token: string,
-  body: Omit<CatalogoProducto, "_id">
+  body: CrearProductoCatalogoBody
 ): Promise<CatalogoProducto> {
   const res = await fetch(`${API_BASE_URL}inventary/product/productos/`, {
     method: "POST",
@@ -375,14 +486,25 @@ export async function crearProductoCatalogo(
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res));
-  return res.json();
+  const data = await res.json();
+  return data.producto as CatalogoProducto;
 }
 
+/**
+ * Edita un producto del catálogo maestro. Solo super_admin.
+ * IMPORTANTE: `id` debe ser el `_id` de Mongo (no el "P007" legible) — el
+ * backend busca por ObjectId acá, a diferencia de la mayoría de los otros
+ * endpoints de este proyecto que aceptan ambos.
+ *
+ * El backend solo devuelve `{ msg }` en el PUT, no el producto actualizado
+ * — por eso esta función no promete devolver el producto, hay que refrescar
+ * la lista después de llamarla.
+ */
 export async function actualizarProductoCatalogo(
   token: string,
   id: string,
-  body: Partial<Omit<CatalogoProducto, "_id">>
-): Promise<CatalogoProducto> {
+  body: Partial<CrearProductoCatalogoBody>
+): Promise<{ msg: string }> {
   const res = await fetch(`${API_BASE_URL}inventary/product/productos/${id}`, {
     method: "PUT",
     headers: buildHeaders(token, true),
@@ -392,6 +514,7 @@ export async function actualizarProductoCatalogo(
   return res.json();
 }
 
+/** Elimina un producto del catálogo maestro. Solo super_admin. `id` = `_id` de Mongo, igual que PUT. */
 export async function eliminarProductoCatalogo(
   token: string,
   id: string

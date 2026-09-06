@@ -5,6 +5,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   ArrowDownRight,
+  ArrowRightLeft,
   ArrowUpRight,
   Building2,
   Check,
@@ -15,7 +16,6 @@ import {
   Plus,
   Search,
   SlidersHorizontal,
-  Sparkles,
   X,
 } from "lucide-react";
 import { Sidebar } from "../../../components/Layout/Sidebar";
@@ -67,7 +67,7 @@ import {
   InventoryMovimientosTab,
   InventoryKardexTab,
 } from "./ProductsInventoryViews";
-
+import { crearTraslado, getSedeOpciones, type SedeOpcion } from "./inventarioApi";
 type CatalogoProducto = {
   id: string;
   nombre: string;
@@ -144,15 +144,9 @@ export function ProductsList() {
   const [isLoadingCatalogo, setIsLoadingCatalogo] = useState(false);
   const [catalogoError, setCatalogoError] = useState<string | null>(null);
   const [nuevoProductoId, setNuevoProductoId] = useState("");
-  const [creacionModo, setCreacionModo] = useState<"catalogo" | "manual">("catalogo");
-  const [nuevoNombreManual, setNuevoNombreManual] = useState("");
-  const [nuevoSkuManual, setNuevoSkuManual] = useState("");
   const [nuevoStockInicial, setNuevoStockInicial] = useState("0");
   const [nuevoStockMinimo, setNuevoStockMinimo] = useState("5");
   const [lineaFormulario, setLineaFormulario] = useState<string>("");
-  const [tipoProducto, setTipoProducto] = useState<string>("ACCESORIO");
-  const [precioReferencia, setPrecioReferencia] = useState<string>("");
-  const [costoReferencia, setCostoReferencia] = useState<string>("");
   const [isCreatingInventario, setIsCreatingInventario] = useState(false);
 
   const [currentPage, setCurrentPage] = useState(1);
@@ -161,11 +155,15 @@ export function ProductsList() {
 
   // New product modal state
   const [isNuevoProductoModalOpen, setIsNuevoProductoModalOpen] = useState(false);
-  const [nuevaVariante, setNuevaVariante] = useState("");
-  const [nuevaUnidad, setNuevaUnidad] = useState("Unidad");
-  const [nuevoStockIdeal, setNuevoStockIdeal] = useState("20");
-  const [paraVentaCheck, setParaVentaCheck] = useState(true);
-  const [usoInternoCheck, setUsoInternoCheck] = useState(false);
+
+  // Traslado de stock a otra sede
+  const [productoTrasladando, setProductoTrasladando] = useState<InventarioProducto | null>(null);
+  const [sedeOpciones, setSedeOpciones] = useState<SedeOpcion[]>([]);
+  const [isLoadingSedeOpciones, setIsLoadingSedeOpciones] = useState(false);
+  const [trasladoSedeDestino, setTrasladoSedeDestino] = useState("");
+  const [trasladoCantidad, setTrasladoCantidad] = useState("");
+  const [trasladoError, setTrasladoError] = useState<string | null>(null);
+  const [isTrasladando, setIsTrasladando] = useState(false);
 
   const canAdjustStock = canAccess(APP_MODULES.SEDE_PRODUCTS, user?.role);
   const canCreateInventory = canAdjustStock;
@@ -365,6 +363,59 @@ export function ProductsList() {
     }
   };
 
+  const abrirTraslado = (producto: InventarioProducto) => {
+    setProductoTrasladando(producto);
+    setTrasladoSedeDestino("");
+    setTrasladoCantidad("");
+    setTrasladoError(null);
+    if (sedeOpciones.length === 0) {
+      const token = resolveToken();
+      if (token) {
+        setIsLoadingSedeOpciones(true);
+        getSedeOpciones(token)
+          .then((opciones) => setSedeOpciones(opciones.filter((o) => o.sede_id !== sedeId)))
+          .catch((err) => setTrasladoError(parseApiError(err)))
+          .finally(() => setIsLoadingSedeOpciones(false));
+      }
+    }
+  };
+
+  const confirmarTraslado = async () => {
+    const token = resolveToken();
+    if (!token || !productoTrasladando) return;
+    if (!trasladoSedeDestino) {
+      setTrasladoError("Selecciona la sede destino");
+      return;
+    }
+    const cantidad = Number(trasladoCantidad);
+    if (!trasladoCantidad || !Number.isFinite(cantidad) || cantidad <= 0) {
+      setTrasladoError("Ingresa una cantidad válida");
+      return;
+    }
+    if (cantidad > (productoTrasladando.stock_actual ?? 0)) {
+      setTrasladoError(`Stock insuficiente (disponible: ${productoTrasladando.stock_actual ?? 0})`);
+      return;
+    }
+
+    setIsTrasladando(true);
+    setTrasladoError(null);
+    try {
+      const result = await crearTraslado(token, {
+        sede_destino: trasladoSedeDestino,
+        items: [{ producto_id: productoTrasladando.producto_id, cantidad }],
+      });
+      const sedeDestinoNombre =
+        sedeOpciones.find((o) => o.sede_id === result.sede_destino)?.nombre || result.sede_destino;
+      setSuccessMessage(`Se trasladaron ${cantidad} u. de "${productoTrasladando.producto_nombre}" a ${sedeDestinoNombre}`);
+      setProductoTrasladando(null);
+      await cargarInventario();
+    } catch (err) {
+      setTrasladoError(parseApiError(err));
+    } finally {
+      setIsTrasladando(false);
+    }
+  };
+
   const lineasDisponibles = useMemo(() => {
     const seen = new Set<string>();
     const result: { id: string; label: string }[] = [];
@@ -394,13 +445,6 @@ export function ProductsList() {
   }, [lineasDisponibles, activeLineaTab]);
 
   const crearInventario = async () => {
-    if (creacionModo === "manual") {
-      setCatalogoError(
-        "Crear producto desde cero está listo en UI. Conecta el endpoint de creación y reemplaza este aviso."
-      );
-      return;
-    }
-
     const token = resolveToken();
     if (!token) {
       setCatalogoError("No se encontró token de autenticación");
@@ -434,10 +478,8 @@ export function ProductsList() {
       setNuevoProductoId("");
       setNuevoStockInicial("0");
       setNuevoStockMinimo("5");
-      setPrecioReferencia("");
-      setCostoReferencia("");
-      setTipoProducto("ACCESORIO");
       setLineaFormulario(lineasDisponibles[0]?.id ?? "");
+      setIsNuevoProductoModalOpen(false);
       await Promise.all([cargarInventario(), cargarCatalogoProductos()]);
     } catch (err) {
       setCatalogoError(parseApiError(err));
@@ -910,6 +952,11 @@ export function ProductsList() {
                                   >
                                     Editar stock
                                   </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    onSelect={(e) => { e.preventDefault(); abrirTraslado(producto); }}
+                                  >
+                                    <ArrowRightLeft className="mr-2 h-4 w-4" /> Trasladar a otra sede
+                                  </DropdownMenuItem>
                                 </DropdownMenuContent>
                               </DropdownMenu>
                             )}
@@ -955,115 +1002,49 @@ export function ProductsList() {
             </CardContent>
           </Card>
 
-          {/* ─── Nuevo producto Dialog ─────────────────────────────── */}
+          {/* ─── Agregar producto (del catálogo) Dialog ────────────── */}
           <Dialog open={isNuevoProductoModalOpen} onOpenChange={setIsNuevoProductoModalOpen}>
-            <DialogContent className="w-full max-w-[500px] bg-white border-gray-200 text-gray-900">
+            <DialogContent className="w-full max-w-[420px] bg-white border-gray-200 text-gray-900">
               <DialogHeader>
-                <DialogTitle className="text-lg font-bold text-gray-900">Crear producto</DialogTitle>
-                <p className="text-xs text-gray-400 -mt-1">Registra un nuevo producto en el inventario.</p>
+                <DialogTitle className="text-lg font-bold text-gray-900">Agregar producto del catálogo</DialogTitle>
+                <p className="text-xs text-gray-400 -mt-1">
+                  Asigna a esta sede un producto que ya existe en el catálogo maestro. Para dar de alta un
+                  producto nuevo en el catálogo, contacta a un Super Admin.
+                </p>
               </DialogHeader>
               <div className="space-y-3 pt-1">
                 <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Nombre del producto</label>
-                  <Input
-                    value={nuevoNombreManual}
-                    onChange={(e) => setNuevoNombreManual(e.target.value)}
-                    placeholder="Ej: Acondicionador Línea Men"
-                    className="border-gray-200 bg-white text-sm"
-                  />
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Producto</label>
+                  <Select
+                    value={nuevoProductoId}
+                    onValueChange={setNuevoProductoId}
+                    disabled={isLoadingCatalogo}
+                  >
+                    <SelectTrigger className="border-gray-200 bg-white text-sm">
+                      <SelectValue
+                        placeholder={
+                          isLoadingCatalogo
+                            ? "Cargando catálogo..."
+                            : "Selecciona un producto"
+                        }
+                      />
+                    </SelectTrigger>
+                    <SelectContent className="bg-white border-gray-200">
+                      {catalogoProductos.length === 0 ? (
+                        <SelectItem value="none" disabled>
+                          {isLoadingCatalogo ? "Cargando..." : "No hay productos disponibles"}
+                        </SelectItem>
+                      ) : (
+                        catalogoProductos.map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.nombre} — {item.codigo}
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Marca</label>
-                    <Select value={lineaFormulario} onValueChange={setLineaFormulario}>
-                      <SelectTrigger className="border-gray-200 bg-white text-sm">
-                        <SelectValue placeholder="Seleccionar marca" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-white border-gray-200">
-                        <SelectItem value="rizos_felices">Rizos Felices</SelectItem>
-                        <SelectItem value="loreal">L'Oréal</SelectItem>
-                        <SelectItem value="wella">Wella</SelectItem>
-                        {lineasDisponibles.map((l) => (
-                          <SelectItem key={l.id} value={l.id}>{l.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Categoría</label>
-                    <Select value={tipoProducto} onValueChange={setTipoProducto}>
-                      <SelectTrigger className="border-gray-200 bg-white text-sm">
-                        <SelectValue placeholder="Seleccionar" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-white border-gray-200">
-                        <SelectItem value="MEN">MEN</SelectItem>
-                        <SelectItem value="SPECIAL">SPECIAL</SelectItem>
-                        <SelectItem value="ACCESORIO">ACCESORIO</SelectItem>
-                        <SelectItem value="USO SALON">USO SALON</SelectItem>
-                        <SelectItem value="USO 2 SALON">USO 2 SALON</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Descripción (opcional)</label>
-                  <Input placeholder="Descripción del producto" className="border-gray-200 bg-white text-sm" />
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">SKU</label>
-                    <Input
-                      value={nuevoSkuManual}
-                      onChange={(e) => setNuevoSkuManual(e.target.value)}
-                      placeholder="Auto"
-                      className="border-gray-200 bg-white text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Unidad</label>
-                    <Select value={nuevaUnidad} onValueChange={setNuevaUnidad}>
-                      <SelectTrigger className="border-gray-200 bg-white text-sm">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="bg-white border-gray-200">
-                        <SelectItem value="Unidad">Unidad</SelectItem>
-                        <SelectItem value="ML">ML</SelectItem>
-                        <SelectItem value="GR">GR</SelectItem>
-                        <SelectItem value="Litro">Litro</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Variante</label>
-                    <Input
-                      value={nuevaVariante}
-                      onChange={(e) => setNuevaVariante(e.target.value)}
-                      placeholder="Ej: 250 ML"
-                      className="border-gray-200 bg-white text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Precio de compra</label>
-                    <Input
-                      value={costoReferencia}
-                      onChange={(e) => setCostoReferencia(e.target.value)}
-                      placeholder="$0"
-                      className="border-gray-200 bg-white text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Precio de venta</label>
-                    <Input
-                      value={precioReferencia}
-                      onChange={(e) => setPrecioReferencia(e.target.value)}
-                      placeholder="$0"
-                      className="border-gray-200 bg-white text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">Stock inicial</label>
                     <Input
@@ -1086,37 +1067,6 @@ export function ProductsList() {
                       className="border-gray-200 bg-white text-sm"
                     />
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Stock ideal</label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={nuevoStockIdeal}
-                      onChange={(e) => setNuevoStockIdeal(e.target.value)}
-                      placeholder="20"
-                      className="border-gray-200 bg-white text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center gap-5 pt-1">
-                  <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={paraVentaCheck}
-                      onChange={(e) => setParaVentaCheck(e.target.checked)}
-                      className="accent-gray-900"
-                    />
-                    Para venta
-                  </label>
-                  <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={usoInternoCheck}
-                      onChange={(e) => setUsoInternoCheck(e.target.checked)}
-                      className="accent-gray-900"
-                    />
-                    Uso interno
-                  </label>
                 </div>
                 {catalogoError && (
                   <p className="text-xs text-red-600">{catalogoError}</p>
@@ -1133,11 +1083,83 @@ export function ProductsList() {
                 </Button>
                 <Button
                   className="bg-gray-900 text-white hover:bg-gray-800 text-sm"
-                  onClick={() => { setCreacionModo("manual"); void crearInventario(); }}
+                  onClick={() => void crearInventario()}
                   disabled={isCreatingInventario}
                 >
                   {isCreatingInventario && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Registrar producto
+                  Agregar a la sede
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog
+            open={Boolean(productoTrasladando)}
+            onOpenChange={(open) => { if (!open) setProductoTrasladando(null); }}
+          >
+            <DialogContent className="w-full max-w-[420px] bg-white border-gray-200 text-gray-900">
+              <DialogHeader>
+                <DialogTitle className="text-lg font-bold text-gray-900">Trasladar a otra sede</DialogTitle>
+                <p className="text-xs text-gray-400 -mt-1">
+                  {productoTrasladando?.producto_nombre} — stock actual: {productoTrasladando?.stock_actual ?? 0}
+                </p>
+              </DialogHeader>
+              <div className="space-y-3 pt-1">
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Sede destino</label>
+                  <Select
+                    value={trasladoSedeDestino}
+                    onValueChange={setTrasladoSedeDestino}
+                    disabled={isLoadingSedeOpciones}
+                  >
+                    <SelectTrigger className="border-gray-200 bg-white text-sm">
+                      <SelectValue
+                        placeholder={isLoadingSedeOpciones ? "Cargando sedes..." : "Selecciona la sede destino"}
+                      />
+                    </SelectTrigger>
+                    <SelectContent className="bg-white border-gray-200">
+                      {sedeOpciones.length === 0 ? (
+                        <SelectItem value="none" disabled>
+                          {isLoadingSedeOpciones ? "Cargando..." : "No hay otras sedes disponibles"}
+                        </SelectItem>
+                      ) : (
+                        sedeOpciones.map((s) => (
+                          <SelectItem key={s.sede_id} value={s.sede_id}>{s.nombre}</SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Cantidad a trasladar</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={productoTrasladando?.stock_actual ?? undefined}
+                    value={trasladoCantidad}
+                    onChange={(e) => setTrasladoCantidad(e.target.value)}
+                    placeholder="0"
+                    className="border-gray-200 bg-white text-sm"
+                  />
+                </div>
+                {trasladoError && <p className="text-xs text-red-600">{trasladoError}</p>}
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-gray-100 mt-2">
+                <Button
+                  variant="outline"
+                  className="border-gray-200 text-gray-600 text-sm"
+                  onClick={() => setProductoTrasladando(null)}
+                  disabled={isTrasladando}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  className="bg-gray-900 text-white hover:bg-gray-800 text-sm"
+                  onClick={() => void confirmarTraslado()}
+                  disabled={isTrasladando}
+                >
+                  {isTrasladando && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Trasladar
                 </Button>
               </div>
             </DialogContent>
@@ -1145,210 +1167,6 @@ export function ProductsList() {
 
           {/* ── legacy inline form (kept for fallback, hidden) ── */}
           <div className="hidden">
-            <Card
-              id="crear-producto-panel"
-              className="border-gray-200 bg-white shadow-sm"
-            >
-              <CardHeader className="pb-2">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <CardTitle className="text-lg font-semibold">Crear producto</CardTitle>
-                    <p className="text-sm text-gray-500">
-                      Reutiliza el catálogo existente y registra el stock inicial.
-                    </p>
-                  </div>
-                  <Sparkles className="h-5 w-5 text-gray-500" />
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {catalogoError ? (
-                  <Alert variant="destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>{catalogoError}</AlertDescription>
-                  </Alert>
-                ) : null}
-
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant={creacionModo === "catalogo" ? "default" : "outline"}
-                    className={creacionModo === "catalogo" ? "bg-black text-white hover:bg-gray-800" : "border-gray-300 text-gray-700"}
-                    onClick={() => setCreacionModo("catalogo")}
-                  >
-                    Usar catálogo
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={creacionModo === "manual" ? "default" : "outline"}
-                    className={creacionModo === "manual" ? "bg-black text-white hover:bg-gray-800" : "border-gray-300 text-gray-700"}
-                    onClick={() => setCreacionModo("manual")}
-                  >
-                    Crear
-                  </Button>
-                </div>
-
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <Select
-                    value={lineaFormulario}
-                    onValueChange={(value) => setLineaFormulario(value)}
-                  >
-                    <SelectTrigger className="border-gray-300 bg-white">
-                      <SelectValue placeholder="Línea de producto" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-white">
-                      {lineasDisponibles.map((linea) => (
-                        <SelectItem key={linea.id} value={linea.id}>
-                          {linea.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  <Select
-                    value={tipoProducto}
-                    onValueChange={(value) => setTipoProducto(value)}
-                  >
-                    <SelectTrigger className="border-gray-300 bg-white">
-                      <SelectValue placeholder="Tipo de producto" />
-                    </SelectTrigger>
-                    <SelectContent className="bg-white">
-                      <SelectItem value="ACCESORIO">ACCESORIO</SelectItem>
-                      <SelectItem value="TRATAMIENTO">TRATAMIENTO</SelectItem>
-                      <SelectItem value="HERRAMIENTA">HERRAMIENTA</SelectItem>
-                    </SelectContent>
-                  </Select>
-
-                  {creacionModo === "catalogo" ? (
-                    <>
-                      <Select
-                        value={nuevoProductoId}
-                        onValueChange={(value) => setNuevoProductoId(value)}
-                        disabled={isLoadingCatalogo}
-                      >
-                        <SelectTrigger className="col-span-1 sm:col-span-2 border-gray-300 bg-white">
-                          <SelectValue
-                            placeholder={
-                              isLoadingCatalogo
-                                ? "Cargando catálogo..."
-                                : "Nombre (selecciona del catálogo)"
-                            }
-                          />
-                        </SelectTrigger>
-                        <SelectContent className="bg-white">
-                          {catalogoProductos.length === 0 ? (
-                            <SelectItem value="none" disabled>
-                              {isLoadingCatalogo
-                                ? "Cargando..."
-                                : "No hay productos disponibles"}
-                            </SelectItem>
-                          ) : (
-                            catalogoProductos.map((item) => (
-                              <SelectItem key={item.id} value={item.id}>
-                                {item.nombre} — {item.codigo}
-                              </SelectItem>
-                            ))
-                          )}
-                        </SelectContent>
-                      </Select>
-
-                      <Input
-                        value={
-                          catalogoProductos.find((item) => item.id === nuevoProductoId)?.codigo ||
-                          "SKU"
-                        }
-                        readOnly
-                        className="border-gray-300 bg-gray-100 text-gray-600"
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <Input
-                        value={nuevoNombreManual}
-                        onChange={(e) => setNuevoNombreManual(e.target.value)}
-                        placeholder="Nombre del producto"
-                        className="col-span-1 sm:col-span-2 border-gray-300"
-                      />
-                      <Input
-                        value={nuevoSkuManual}
-                        onChange={(e) => setNuevoSkuManual(e.target.value)}
-                        placeholder="SKU / Código"
-                        className="border-gray-300"
-                      />
-                    </>
-                  )}
-
-                  <Input
-                    type="number"
-                    min={0}
-                    value={nuevoStockInicial}
-                    onChange={(e) => setNuevoStockInicial(e.target.value)}
-                    placeholder="Stock inicial"
-                    className="border-gray-300"
-                  />
-
-                  <Input
-                    type="number"
-                    min={0}
-                    value={nuevoStockMinimo}
-                    onChange={(e) => setNuevoStockMinimo(e.target.value)}
-                    placeholder="Stock mínimo"
-                    className="border-gray-300"
-                  />
-
-                  <Input
-                    type="number"
-                    min={0}
-                    value={precioReferencia}
-                    onChange={(e) => setPrecioReferencia(e.target.value)}
-                    placeholder="Precio de venta"
-                    className="border-gray-300"
-                  />
-
-                  <Input
-                    type="number"
-                    min={0}
-                    value={costoReferencia}
-                    onChange={(e) => setCostoReferencia(e.target.value)}
-                    placeholder="Costo"
-                    className="border-gray-300"
-                  />
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500">
-                  <span>Precios y costos son de referencia (el backend aún no los almacena).</span>
-                </div>
-
-                <div className="flex justify-end gap-2">
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      setNuevoProductoId("");
-                      setLineaFormulario(lineasDisponibles[0]?.id ?? "");
-                      setNuevoNombreManual("");
-                      setNuevoSkuManual("");
-                      setNuevoStockInicial("0");
-                      setNuevoStockMinimo("5");
-                      setPrecioReferencia("");
-                      setCostoReferencia("");
-                      setCreacionModo("catalogo");
-                    }}
-                  >
-                    Cancelar
-                  </Button>
-                  <Button
-                    onClick={crearInventario}
-                    disabled={isCreatingInventario}
-                    className="bg-black text-white hover:bg-gray-800"
-                  >
-                    {isCreatingInventario ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : null}
-                    Registrar producto
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-
             <Card className="border-gray-200 bg-white shadow-sm">
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
                 <div>
