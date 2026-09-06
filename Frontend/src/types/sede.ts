@@ -14,6 +14,13 @@ export interface Sede {
   fecha_creacion: string;
   creado_por: string;
   activa: boolean;
+  /**
+   * Determina si las ventas de productos en esta sede generan comisión.
+   * Default del backend: "servicios" — con eso, NINGUNA venta de producto
+   * genera comisión sin importar cómo esté configurado el vendedor/producto.
+   * Hay que ponerla en "mixto" (o "productos") explícitamente por sede.
+   */
+  reglas_comision?: { tipo: "servicios" | "productos" | "mixto" };
 }
 
 // Tipo para crear sedes (sin los campos automáticos)
