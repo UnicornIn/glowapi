@@ -9,7 +9,7 @@
 export const brand = {
   appName: import.meta.env.VITE_APP_NAME || "NEXA",
   companyName: import.meta.env.VITE_APP_COMPANY_NAME || "NEXA",
-  logoUrl: import.meta.env.VITE_APP_LOGO_URL || "/sense-logo.svg",
+  logoUrl: import.meta.env.VITE_APP_LOGO_URL || "/nexa-icon.png",
   faviconUrl: import.meta.env.VITE_APP_FAVICON_URL || "/favicon.png",
   footerLegal: "",
   wsUrl: "",

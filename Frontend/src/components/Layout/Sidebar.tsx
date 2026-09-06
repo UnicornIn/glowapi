@@ -305,9 +305,21 @@ export function Sidebar() {
       {/* Top navigation header */}
       <header className="h-16 bg-white border-b border-gray-200 flex items-center px-4 gap-3 shrink-0 w-full">
         {/* Logo */}
-        <h1 className="text-gray-900 font-bold text-base whitespace-nowrap shrink-0">
-          {brand.appName}
-        </h1>
+        <div className="flex items-center gap-2 shrink-0">
+          {brand.logoUrl && (
+            <img
+              src={brand.logoUrl}
+              alt=""
+              className="h-7 w-7 object-contain"
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = "none";
+              }}
+            />
+          )}
+          <h1 className="text-gray-900 font-bold text-base whitespace-nowrap">
+            {brand.appName}
+          </h1>
+        </div>
 
         <div className="h-5 w-px bg-gray-200 shrink-0 hidden md:block" />
 
