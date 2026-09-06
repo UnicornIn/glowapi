@@ -56,7 +56,14 @@ class ServicioEnCita(BaseModel):
     servicio_id: str
     precio_personalizado: Optional[float] = None  # Puede ser None, 0, o un número positivo
     cantidad: Optional[int] = 1
-    
+    paquete_id: Optional[str] = None  # ID del paquete de sesiones del cliente que cubre esta sesión (no se cobra de nuevo)
+    # Si se marca, esta cita compra un paquete de sesiones prepagas del propio
+    # servicio (debe matchear una opción de `paquetes_sesiones` del servicio) —
+    # esta primera sesión se descuenta de inmediato, quedan las demás de saldo.
+    # Mutuamente excluyente con `paquete_id` (no se puede comprar y canjear a
+    # la vez en la misma línea).
+    comprar_paquete_sesiones: Optional[int] = None
+
     @validator('precio_personalizado')
     def validar_precio(cls, v):
         # Si es 0, convertir a None (significa "usar precio de BD")
