@@ -82,9 +82,9 @@ export default function ServicesPage() {
             duracion_minutos: service.duracion,
             precio: service.precio,
             categoria: service.categoria,
-            comision_estilista: service.comision_porcentaje,
             activo: service.activo,
-            requiere_producto: service.requiere_producto || false
+            requiere_producto: service.requiere_producto || false,
+            paquetes_sesiones: service.paquetes_sesiones
           }
         );
       } else {
@@ -93,9 +93,9 @@ export default function ServicesPage() {
           duracion_minutos: service.duracion,
           precio: service.precio,
           categoria: service.categoria,
-          comision_estilista: service.comision_porcentaje,
           activo: service.activo,
-          requiere_producto: service.requiere_producto || false
+          requiere_producto: service.requiere_producto || false,
+          paquetes_sesiones: service.paquetes_sesiones
         });
       }
 
@@ -117,7 +117,12 @@ export default function ServicesPage() {
       return;
     }
 
-    const confirmed = await confirmAction({ title: "Confirmar", message: "¿Estás seguro de que quieres eliminar este servicio?", confirmLabel: "Sí, eliminar", variant: "danger" });
+    const confirmed = await confirmAction({
+      title: "Eliminar servicio",
+      message: "Esto borra el servicio por completo, no se puede deshacer. Si tiene citas o paquetes de sesiones asociados, no se podrá eliminar — en ese caso, desmarca \"Activo\" en Editar para dejar de ofrecerlo sin perder el historial.",
+      confirmLabel: "Sí, eliminar",
+      variant: "danger"
+    });
     if (!confirmed) {
       return;
     }
