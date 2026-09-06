@@ -12,6 +12,8 @@ import { FichaCuidadoPostColor } from './fichas/FichaCuidadoPostColor'
 import { FichaValoracionPruebaColor } from './fichas/FichaValoracionPruebaColor'
 import { FichaOzonoterapiaCapilar } from './fichas/FichaOzonoterapiaCapilar'
 import { FichaEstilizado } from './fichas/FichaEstilizado'
+import { FichaHistoriaClinicaFisioterapia } from './fichas/HistoriaClinica/FichaFisioterapia'
+import { FichaHistoriaClinicaPisoPelvico } from './fichas/HistoriaClinica/FichaPisoPelvico'
 import { API_BASE_URL } from '../../../types/config'
 // import { getFichaAuthToken } from './fichas/fichaHelpers'
 // Añadir al inicio del archivo, junto con los otros imports
@@ -23,6 +25,9 @@ import { ShoppingCart } from "lucide-react";
 import { formatSedeNombre } from "../../../lib/sede";
 import { formatDateDMY } from "../../../lib/dateFormat";
 import { useTenantConfig } from "../../../config/TenantConfigContext";
+import { combinarConTemplates, listarFichaTemplates } from "../../../lib/fichaTemplates";
+import { confirmAction } from "../../../components/ui/confirm-dialog";
+import { Pencil, Trash2 } from "lucide-react";
 
 interface AttentionProtocolProps {
   citaSeleccionada?: any;
@@ -40,7 +45,9 @@ type TipoFicha =
   | "CUIDADO_POST_COLOR"
   | "VALORACION_PRUEBA_COLOR"
   | "OZONOTERAPIA_CAPILAR"
-  | "FICHA_ESTILIZADO";
+  | "FICHA_ESTILIZADO"
+  | "HISTORIA_CLINICA_FISIOTERAPIA"
+  | "HISTORIA_CLINICA_PISO_PELVICO";
 
 type VistaPrincipal = "fichas" | "productos" | "calendario" | "menu-principal" | "ver-fichas";
 // Código de calificación del cliente desactivado temporalmente.
@@ -85,7 +92,28 @@ export function AttentionProtocol({
   usuarioRol = "estilista",
 }: AttentionProtocolProps) {
   const primaryActionButtonClass = "bg-black text-white hover:bg-gray-800 disabled:bg-gray-400 disabled:text-white"
-  const { features, fichas: fichasConfig } = useTenantConfig()
+  const { features, fichas: fichasEstaticas } = useTenantConfig()
+  // Catálogo dinámico: arranca con el estático (fallback, ver fichas.ts) y se
+  // actualiza con lo que diga el backend en cuanto responde. Si el fetch
+  // falla, se queda con el estático — nunca rompe el selector de fichas.
+  const [fichasConfig, setFichasConfig] = useState(fichasEstaticas)
+  useEffect(() => {
+    let cancelado = false
+    // solo_activos=false: hace falta ver también las que un admin desactivó
+    // explícitamente, si no, una ficha apagada nunca aparecería en la
+    // respuesta y este merge la dejaría "encendida" por el fallback estático.
+    listarFichaTemplates(false)
+      .then((templates) => {
+        if (!cancelado && templates.length > 0) {
+          setFichasConfig(combinarConTemplates(fichasEstaticas, templates))
+        }
+      })
+      .catch(() => {
+        // Sin conexión o sin templates aún: se queda con el catálogo estático.
+      })
+    return () => { cancelado = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const fichasHabilitadas = fichasConfig.filter((ficha) => ficha.enabled)
   const [tipoFichaSeleccionada, setTipoFichaSeleccionada] = useState<TipoFicha | null>(null)
   const [vistaActual, setVistaActual] = useState<VistaPrincipal>("calendario")
@@ -98,8 +126,7 @@ export function AttentionProtocol({
   const [detalleFicha, setDetalleFicha] = useState<FichaServidor | null>(null)
   const [mostrarModalBloqueos, setMostrarModalBloqueos] = useState(false);
   const [fichaEnEdicion, setFichaEnEdicion] = useState<FichaServidor | null>(null);
-  // Edición de fichas deshabilitada temporalmente
-  // const [loadingFichaEdicionId, setLoadingFichaEdicionId] = useState<string | null>(null);
+  const [eliminandoFichaId, setEliminandoFichaId] = useState<string | null>(null)
   const [fechaSeleccionadaParaBloqueo, setFechaSeleccionadaParaBloqueo] = useState<string>("");
   const [totalProductos, setTotalProductos] = useState(0);
   const [, setCitaConProductos] = useState<any>(citaSeleccionada);
@@ -306,7 +333,7 @@ export function AttentionProtocol({
             comentario_interno: ficha.comentario_interno || ficha.descripcion_servicio || ''
           },
           servicio_nombre: ficha.servicio_nombre || ficha.servicio || 'Servicio sin nombre',
-          profesional_nombre: ficha.profesional_nombre || ficha.estilista || 'Estilista no asignado',
+          profesional_nombre: ficha.profesional_nombre || ficha.estilista || 'Profesional no asignado',
           sede_nombre: formatSedeNombre(ficha.sede_nombre || ficha.sede || ficha.local, 'Sede no especificada')
         };
       });
@@ -322,6 +349,53 @@ export function AttentionProtocol({
       setLoadingFichas(false);
     }
   };
+
+  const handleEliminarFicha = async (ficha: FichaServidor) => {
+    const fichaId = ficha.id;
+    const token = localStorage.getItem('access_token') || sessionStorage.getItem('access_token');
+    if (!fichaId || !token) return;
+
+    const confirmado = await confirmAction({
+      title: 'Eliminar ficha',
+      message: `¿Eliminar la ficha de ${ficha.servicio_nombre || 'este servicio'}? Esta acción no se puede deshacer.`,
+      confirmLabel: 'Sí, eliminar',
+      variant: 'danger',
+    });
+    if (!confirmado) return;
+
+    setEliminandoFichaId(fichaId);
+    try {
+      const response = await fetch(`${API_BASE_URL}scheduling/quotes/fichas/${fichaId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        const detalle = await response.json().catch(() => null);
+        throw new Error(detalle?.detail || `Error ${response.status} al eliminar la ficha`);
+      }
+      toast.success('Ficha eliminada');
+      const clienteId = citaSeleccionada?.cliente?.cliente_id;
+      if (clienteId) fetchFichasCliente(clienteId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo eliminar la ficha');
+    } finally {
+      setEliminandoFichaId(null);
+    }
+  };
+
+  // "Ver Detalles" y "Editar" abren el mismo formulario que ya usa la
+  // creación (HCShell para Historia Clínica, etc.) — ya sabe mostrar el
+  // contenido real organizado en secciones (evoluciones incluidas), a
+  // diferencia del volcado de JSON crudo que mostraba antes la vista de
+  // solo-lectura para cualquier campo no escalar. Ambas acciones terminan
+  // siendo "editable" (el profesional ya puede editar sus propias fichas de
+  // todos modos), pero eso es preferible a una vista bonita que solo sirve
+  // para mirar.
+  const verFichaConSuPropioFormato = (ficha: FichaServidor) => {
+    setFichaEnEdicion(ficha);
+    setTipoFichaSeleccionada(ficha.tipo_ficha);
+  };
+
   // Función para formatear la fecha
   const formatFecha = (fechaString: string) => formatDateDMY(fechaString, fechaString)
 
@@ -794,7 +868,7 @@ export function AttentionProtocol({
 
       // Mostrar mensaje según rol
       let mensaje = usuarioRol === "estilista"
-        ? "✅ Servicio finalizado como estilista. El admin puede proceder con la facturación."
+        ? "✅ Servicio finalizado como profesional. El admin puede proceder con la facturación."
         : "✅ Servicio finalizado por administración.";
 
       if (!seGeneroPdf) {
@@ -1730,7 +1804,7 @@ export function AttentionProtocol({
                 <div
                   key={ficha.id}
                   className={`border rounded p-3 hover:shadow transition-shadow cursor-pointer ${getColorPorTipoFicha(ficha.tipo_ficha)}`}
-                  onClick={() => setDetalleFicha(ficha)}
+                  onClick={() => verFichaConSuPropioFormato(ficha)}
                 >
                   <div className="flex justify-between items-start mb-1">
                     <div>
@@ -1777,14 +1851,38 @@ export function AttentionProtocol({
                       size="sm"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setDetalleFicha(ficha);
+                        verFichaConSuPropioFormato(ficha);
                       }}
                       className="text-xs"
                     >
                       <Eye className="h-3 w-3 mr-1" /> {/* REDUCIDO de h-4 w-4 mr-2 */}
                       Ver Detalles
                     </Button>
-                    {/* Botón de edición de fichas deshabilitado */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        verFichaConSuPropioFormato(ficha);
+                      }}
+                      className="text-xs"
+                    >
+                      <Pencil className="h-3 w-3 mr-1" />
+                      Editar
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={eliminandoFichaId === ficha.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleEliminarFicha(ficha);
+                      }}
+                      className="text-xs text-red-600 border-red-200 hover:bg-red-50"
+                    >
+                      <Trash2 className="h-3 w-3 mr-1" />
+                      {eliminandoFichaId === ficha.id ? 'Eliminando...' : 'Eliminar'}
+                    </Button>
                   </div>
                 </div>
               );
@@ -2355,7 +2453,7 @@ export function AttentionProtocol({
                   {usuarioRol === "estilista" ? (
                     <>
                       <CheckCircle className="w-3 h-3 mr-1" />
-                      Finalizar Servicio (Estilista)
+                      Finalizar Servicio (Profesional)
                     </>
                   ) : (
                     <>
@@ -2388,6 +2486,7 @@ export function AttentionProtocol({
   }
 
   if (citaSeleccionada && tipoFichaSeleccionada) {
+    const editandoFichaExistente = Boolean(fichaEnEdicion);
     const datosGuardados = cargarFichaGuardada(tipoFichaSeleccionada);
     const datosDesdeFicha = extraerDatosInicialesFicha(fichaEnEdicion, tipoFichaSeleccionada);
     const datosIniciales = datosDesdeFicha || datosGuardados;
@@ -2397,7 +2496,7 @@ export function AttentionProtocol({
       datosIniciales,
       onGuardar: (datos: any) => guardarFicha(tipoFichaSeleccionada, datos),
       fichaId: fichaEnEdicion?.id,
-      modoEdicion: Boolean(fichaEnEdicion),
+      modoEdicion: editandoFichaExistente,
       onSubmit: (_: any) => {
         const citaId = getCitaId(citaSeleccionada);
         const clienteIdActual = citaSeleccionada?.cliente?.cliente_id || citaSeleccionada?.cliente_id;
@@ -2413,15 +2512,18 @@ export function AttentionProtocol({
           fetchFichasCliente(clienteIdActual);
         }
 
+        // Si se estaba editando una ficha ya guardada, volver a esa lista en
+        // vez de al menú de "crear ficha" (que sí tiene sentido tras crear
+        // una nueva desde cero).
+        setVistaActual(editandoFichaExistente ? "ver-fichas" : "fichas");
         setFichaEnEdicion(null);
         setTipoFichaSeleccionada(null);
-        setVistaActual("fichas");
         scrollBottomSheetToTop();
       },
       onCancelar: () => {
+        setVistaActual(editandoFichaExistente ? "ver-fichas" : "fichas");
         setFichaEnEdicion(null);
         setTipoFichaSeleccionada(null);
-        setVistaActual("fichas");
         scrollBottomSheetToTop();
       }
     };
@@ -2442,6 +2544,10 @@ export function AttentionProtocol({
           return <FichaOzonoterapiaCapilar {...fichaProps} />;
         case "FICHA_ESTILIZADO":
           return <FichaEstilizado {...fichaProps} />;
+        case "HISTORIA_CLINICA_FISIOTERAPIA":
+          return <FichaHistoriaClinicaFisioterapia {...fichaProps} />;
+        case "HISTORIA_CLINICA_PISO_PELVICO":
+          return <FichaHistoriaClinicaPisoPelvico {...fichaProps} />;
         default:
           return null;
       }
@@ -2519,7 +2625,7 @@ export function AttentionProtocol({
                   {usuarioRol === "estilista" ? "Finalizando..." : "Procesando..."}
                 </>
               ) : usuarioRol === "estilista" ? (
-                'Sí, Finalizar como Estilista'
+                'Sí, Finalizar como Profesional'
               ) : (
                 'Sí, Finalizar y Facturar'
               )}

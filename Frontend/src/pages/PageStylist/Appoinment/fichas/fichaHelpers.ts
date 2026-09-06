@@ -8,7 +8,7 @@ export type FichaEstilistaData = {
 };
 
 const formatNombreEstilista = (value: string): string => {
-  if (!value) return "Estilista";
+  if (!value) return "Profesional";
   if (!value.includes("@")) return value;
 
   const namePart = value.split("@")[0];
@@ -26,7 +26,7 @@ export const getFichaAuthToken = (): string => {
 
 export const getEstilistaDataFromCita = (cita: Cita): FichaEstilistaData => {
   try {
-    const estilistaNombre = sessionStorage.getItem("beaux-name") || "Estilista";
+    const estilistaNombre = sessionStorage.getItem("beaux-name") || "Profesional";
     const estilistaEmail = sessionStorage.getItem("beaux-email") || "";
     const estilistaRole = sessionStorage.getItem("beaux-role") || "estilista";
     const profesionalIdStorage =
@@ -45,7 +45,7 @@ export const getEstilistaDataFromCita = (cita: Cita): FichaEstilistaData => {
   } catch (error) {
     console.error("Error obteniendo datos del estilista:", error);
     return {
-      nombre: "Estilista",
+      nombre: "Profesional",
       email: "",
       id: String(cita.estilista_id || cita.profesional_id || "").trim(),
       role: "estilista"

@@ -135,7 +135,7 @@ export function FichaEstilizado({
             />
           </div>
           <div className="fe-client-field" style={{ maxWidth: 140 }}>
-            <label>Estilista</label>
+            <label>Profesional</label>
             <input
               type="text"
               placeholder="Tu nombre"
@@ -252,7 +252,7 @@ export function FichaEstilizado({
         <div className="fe-section-label">05 · Observaciones</div>
         <textarea
           className="fe-notes-field"
-          placeholder="Observaciones del estilista sobre el cabello, el comportamiento del producto, recomendaciones para la próxima cita..."
+          placeholder="Observaciones del profesional sobre el cabello, el comportamiento del producto, recomendaciones para la próxima cita..."
           value={observaciones}
           onChange={(e) => setObservaciones(e.target.value)}
         />
@@ -303,7 +303,7 @@ export function FichaEstilizado({
             {bestTechniqueName || "—"}
           </div>
           <div className="fe-technique-full">
-            {bestTechnique?.full || "Selecciona las variables en la vista Estilista"}
+            {bestTechnique?.full || "Selecciona las variables en la vista Profesional"}
           </div>
           {allSelected && (
             <div className="fe-technique-badge">
@@ -353,7 +353,7 @@ export function FichaEstilizado({
 
         {/* Next appointment */}
         <div className="fe-next-section">
-          <div className="fe-next-label">Recomendación de tu estilista</div>
+          <div className="fe-next-label">Recomendación de tu profesional</div>
           <div className="fe-next-text">
             Para mantener la salud de tu cabello, te recomendamos volver en 3
             semanas con la misma técnica o evaluando si tu porosidad ha cambiado.
@@ -374,7 +374,7 @@ export function FichaEstilizado({
 
         <div className="fe-powered-by">
           <p className="fe-powered-text">
-            Impulsado por <span className="fe-powered-brand">sëns</span>
+            Impulsado por <span className="fe-powered-brand">NEXA</span>
           </p>
         </div>
       </div>
@@ -385,14 +385,14 @@ export function FichaEstilizado({
     <div className="ficha-estilizado">
       <nav className="fe-nav">
         <div className="fe-nav-logo">
-          sëns
+          Nexa
         </div>
         <div className="fe-view-toggle">
           <button
             className={`fe-toggle-btn${activeView === "stylist" ? " active" : ""}`}
             onClick={() => setActiveView("stylist")}
           >
-            Estilista
+            Profesional
           </button>
           <button
             className={`fe-toggle-btn${activeView === "client" ? " active" : ""}`}
