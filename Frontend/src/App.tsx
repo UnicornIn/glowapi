@@ -42,8 +42,9 @@ import SedeServices from './pages/PageSede/Services/Services';
 import SedeStylists from './pages/PageSede/Styslit/Sytlist';
 import SedeCommissions from './pages/PageSede/Comisiones/Comisiones'; // Módulo de comisiones para admin_sede
 import SedeInvoices from "./pages/PageSede/Sales-invoiced/Sales-invoiced"
-// import CierreCajaPage from "./pages/PageSede/CierreCaja/CierreCaja"
+import CierreCajaPage from "./pages/PageSede/CierreCaja/CierreCaja"
 import FinanzasPage from "./pages/PageSede/Finanzas/Finanzas";
+import FichasConfigPage from "./pages/PageSede/FichasConfig/FichasConfig";
 
 /* --- Stylist Pages --- */
 import StylistAppointment from "./pages/PageStylist/Appoinment/Appointment";
@@ -236,14 +237,14 @@ function App() {
                 </PrivateRoute>
               }
             />
-            {/* <Route
+            <Route
               path="/superadmin/cierre-caja"
               element={
                 <PrivateRoute requiredAccess={APP_MODULES.SUPER_CIERRE_CAJA}>
                   <CierreCajaPage />
                 </PrivateRoute>
               }
-            /> */}
+            />
             <Route
               path="/superadmin/gift-cards"
               element={
@@ -268,6 +269,14 @@ function App() {
                 </PrivateRoute>
               }
             />
+            <Route
+              path="/superadmin/fichas"
+              element={
+                <PrivateRoute requiredAccess={APP_MODULES.SUPER_FICHAS_CONFIG}>
+                  <FichasConfigPage />
+                </PrivateRoute>
+              }
+            />
 
             {/* --- ADMIN SEDE --- */}
             <Route
@@ -286,14 +295,14 @@ function App() {
                 </PrivateRoute>
               }
             />
-            {/* <Route
+            <Route
               path="/sede/cierre-caja"
               element={
                 <PrivateRoute requiredAccess={APP_MODULES.SEDE_CIERRE_CAJA}>
                   <CierreCajaPage />
                 </PrivateRoute>
               }
-            /> */}
+            />
             {/* Ruta del módulo de Comisiones para admin_sede */}
             <Route
               path="/sede/commissions"
@@ -316,6 +325,14 @@ function App() {
               element={
                 <PrivateRoute requiredAccess={APP_MODULES.SEDE_FINANZAS}>
                   <FinanzasPage />
+                </PrivateRoute>
+              }
+            />
+            <Route
+              path="/sede/fichas"
+              element={
+                <PrivateRoute requiredAccess={APP_MODULES.SEDE_FICHAS_CONFIG}>
+                  <FichasConfigPage />
                 </PrivateRoute>
               }
             />

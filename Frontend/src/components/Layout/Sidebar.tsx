@@ -73,8 +73,8 @@ const navItems: NavItem[] = [
 
   { title: "Sedes", href: "/superadmin/sedes", icon: Home, module: APP_MODULES.SUPER_SEDES },
 
-  { title: "Estilistas", href: "/superadmin/stylists", icon: Users, module: APP_MODULES.SUPER_STYLISTS },
-  { title: "Estilistas", href: "/sede/stylists", icon: Users, module: APP_MODULES.SEDE_STYLISTS },
+  { title: "Profesionales", href: "/superadmin/stylists", icon: Users, module: APP_MODULES.SUPER_STYLISTS },
+  { title: "Profesionales", href: "/sede/stylists", icon: Users, module: APP_MODULES.SEDE_STYLISTS },
 
   { title: "Usuarios Sistema", href: "/superadmin/system-users", icon: Users, module: APP_MODULES.SUPER_SYSTEM_USERS },
 
@@ -83,6 +83,16 @@ const navItems: NavItem[] = [
 
   { title: "Finanzas", href: "/superadmin/finanzas", icon: Wallet, module: APP_MODULES.SUPER_FINANZAS },
   { title: "Finanzas", href: "/sede/finanzas", icon: Wallet, module: APP_MODULES.SEDE_FINANZAS },
+
+  // Entrada de sidebar oculta a pedido del negocio (2026-09-04): la pantalla
+  // de catálogo de fichas (/superadmin/fichas, /sede/fichas) queda redundante
+  // por ahora — más adelante iría dentro de un módulo "Configuraciones" más
+  // amplio (activar/desactivar citas, correos de confirmación, etc.), pero
+  // eso es trabajo futuro. Se oculta solo la entrada de navegación — la
+  // ruta, el componente y los endpoints de ficha-templates siguen intactos,
+  // así que sigue siendo accesible por URL directa si hiciera falta.
+  // { title: "Fichas", href: "/superadmin/fichas", icon: FileText, module: APP_MODULES.SUPER_FICHAS_CONFIG },
+  // { title: "Fichas", href: "/sede/fichas", icon: FileText, module: APP_MODULES.SEDE_FICHAS_CONFIG },
 
   { title: "Gift Cards", href: "/superadmin/gift-cards", icon: Gift, module: APP_MODULES.SUPER_GIFT_CARDS },
   { title: "Gift Cards", href: "/sede/gift-cards", icon: Gift, module: APP_MODULES.SEDE_GIFT_CARDS },
