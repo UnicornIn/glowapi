@@ -14,6 +14,24 @@ export interface CreateClienteData {
   fecha_de_nacimiento?: string;
 }
 
+// Paquete de sesiones prepagas (ej. "5 sesiones de Terapia individual piso
+// pélvico") que el cliente compró — lo crea automáticamente el backend al
+// facturar una cita que compra un paquete, nunca se crea a mano.
+export interface PaqueteCliente {
+  paquete_id: string;
+  cliente_id: string;
+  sede_id: string;
+  servicio_id: string;
+  nombre_servicio: string;
+  sesiones_totales: number;
+  sesiones_usadas: number;
+  sesiones_restantes: number;
+  valor_por_sesion: number;
+  moneda: string;
+  activo: boolean;
+  fecha_compra: string;
+}
+
 export interface UpdateClienteData {
   cliente_id?: string;
   nombre?: string;
@@ -637,8 +655,8 @@ ${datos.observaciones_generales || 'Ninguna'}`;
           servicio_nombre: ficha.servicio_nombre || ficha.servicio || 'Servicio sin nombre',
           sede: ficha.sede || ficha.sede_nombre || 'Sede no especificada',
           sede_nombre: ficha.sede_nombre || ficha.sede || 'Sede no especificada',
-          estilista: ficha.estilista || ficha.profesional_nombre || 'Estilista no asignado',
-          profesional_nombre: ficha.profesional_nombre || ficha.estilista || 'Estilista no asignado',
+          estilista: ficha.estilista || ficha.profesional_nombre || 'Profesional no asignado',
+          profesional_nombre: ficha.profesional_nombre || ficha.estilista || 'Profesional no asignado',
           sede_estilista: ficha.sede_estilista || ficha.sede || ficha.sede_nombre || 'Sede no especificada',
 
           // 🔥 Asegurar campos obligatorios
@@ -765,6 +783,46 @@ ${datos.observaciones_generales || 'Ninguna'}`;
     return await response.json();
   },
 
+  /**
+   * Desactiva un cliente (soft delete) — no lo borra, solo lo marca
+   * `activo: false`. Deja de aparecer en listados y búsquedas, pero su
+   * historial de citas/fichas/facturación no se toca. Se puede reactivar
+   * con `updateCliente(token, clienteId, { activo: true } as any)`.
+   */
+  async obtenerPaquetesCliente(token: string, clienteId: string, soloActivos = true): Promise<PaqueteCliente[]> {
+    const response = await fetch(`${API_BASE_URL}clientes/${clienteId}/paquetes?solo_activos=${soloActivos}`, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Error al obtener paquetes del cliente: ${response.statusText}`);
+    }
+
+    return await response.json();
+  },
+
+  async eliminarCliente(token: string, clienteId: string): Promise<{ success: boolean; msg: string }> {
+    const response = await fetch(`${API_BASE_URL}clientes/${clienteId}`, {
+      method: 'DELETE',
+      headers: {
+        accept: 'application/json',
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      const errorMessage = errorData?.detail || `Error ${response.status}: ${response.statusText}`;
+      throw new Error(errorMessage);
+    }
+
+    return await response.json();
+  },
+
   async agregarNota(token: string, clienteId: string, nota: string, autor?: string): Promise<void> {
     const response = await fetch(`${API_BASE_URL}clientes/${clienteId}/notas`, {
       method: 'POST',
@@ -821,7 +879,7 @@ ${datos.observaciones_generales || 'Ninguna'}`;
       // 🔥 TRANSFORMAR LAS CITAS CORRECTAMENTE
       return citas.map((cita: any) => {
         // Obtener estilista - YA VIENE EN profesional_nombre
-        const estilista = cita.profesional_nombre || 'Estilista no especificado';
+        const estilista = cita.profesional_nombre || 'Profesional no especificado';
 
         // 🔥 NO FORMATAR LA FECHA AQUÍ - DEJARLA COMO VIENE DEL SERVIDOR
         const fechaOriginal = cita.fecha; // Esto debería ser '2025-12-19'

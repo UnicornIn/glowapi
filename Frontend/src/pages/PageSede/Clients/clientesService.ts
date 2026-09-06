@@ -26,6 +26,24 @@ export interface UpdateClienteData {
   notas?: string;
 }
 
+// Paquete de sesiones prepagas (ej. "5 sesiones de Terapia individual piso
+// pélvico") que el cliente compró — lo crea automáticamente el backend al
+// facturar una cita que compra un paquete, nunca se crea a mano.
+export interface PaqueteCliente {
+  paquete_id: string;
+  cliente_id: string;
+  sede_id: string;
+  servicio_id: string;
+  nombre_servicio: string;
+  sesiones_totales: number;
+  sesiones_usadas: number;
+  sesiones_restantes: number;
+  valor_por_sesion: number;
+  moneda: string;
+  activo: boolean;
+  fecha_compra: string;
+}
+
 export interface ClienteResponse {
   _id: string;
   cliente_id: string;
@@ -592,7 +610,8 @@ export const clientesService = {
             let nombreProfesionalFinal = safeText((ficha as any).profesional_nombre, '');
             const estilistaRaw = safeText((ficha as any).estilista, '');
 
-            if (nombreProfesionalFinal === "Estilista" && estilistaRaw && estilistaRaw !== "Estilista") {
+            const esNombreGenerico = (v: string) => v === "Estilista" || v === "Profesional";
+            if (esNombreGenerico(nombreProfesionalFinal) && estilistaRaw && !esNombreGenerico(estilistaRaw)) {
               nombreProfesionalFinal = estilistaRaw;
             }
             if (!nombreProfesionalFinal) {
@@ -930,6 +949,46 @@ export const clientesService = {
       const errorData = await response.json().catch(() => null);
       const errorMessage = errorData?.detail || `Error ${response.status}: ${response.statusText}`;
       throw new Error(errorMessage);
+    }
+
+    return await response.json();
+  },
+
+  /**
+   * Desactiva un cliente (soft delete) — no lo borra, solo lo marca
+   * `activo: false`. Deja de aparecer en listados y búsquedas, pero su
+   * historial de citas/fichas/facturación no se toca. Se puede reactivar
+   * con `updateCliente(token, clienteId, { activo: true } as any)`.
+   */
+  async eliminarCliente(token: string, clienteId: string): Promise<{ success: boolean; msg: string }> {
+    const response = await fetch(`${API_BASE_URL}clientes/${clienteId}`, {
+      method: 'DELETE',
+      headers: {
+        accept: 'application/json',
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      const errorMessage = errorData?.detail || `Error ${response.status}: ${response.statusText}`;
+      throw new Error(errorMessage);
+    }
+
+    return await response.json();
+  },
+
+  async obtenerPaquetesCliente(token: string, clienteId: string, soloActivos = true): Promise<PaqueteCliente[]> {
+    const response = await fetch(`${API_BASE_URL}clientes/${clienteId}/paquetes?solo_activos=${soloActivos}`, {
+      method: 'GET',
+      headers: {
+        accept: 'application/json',
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Error al obtener paquetes del cliente: ${response.statusText}`);
     }
 
     return await response.json();

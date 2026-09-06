@@ -1,12 +1,14 @@
 "use client"
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
 import type { Cliente } from "../../../types/cliente"
 import { EditClientModal } from "./EditClientModal"
-import { clientesService } from "./clientesService"
+import { clientesService, type PaqueteCliente } from "./clientesService"
 import { useAuth } from "../../../components/Auth/AuthContext"
 import { API_BASE_URL } from "../../../types/config"
-import { useTenantConfig } from "../../../config/TenantConfigContext"
+import { confirmAction } from "../../../components/ui/confirm-dialog"
+import { FichaEditModal } from "../../../components/Clients/FichaEditModal"
 
 interface ClientDetailProps {
   client: Cliente
@@ -15,7 +17,7 @@ interface ClientDetailProps {
   onClientUpdated?: () => void
 }
 
-type Tab = 'resumen' | 'perfil' | 'evolucion' | 'historial' | 'notas'
+type Tab = 'resumen' | 'evolucion' | 'historial' | 'notas'
 
 const fmt = (n: number) => "$" + Math.round(n).toLocaleString("es-CO")
 const ini = (n: string) =>
@@ -169,18 +171,86 @@ function ResumenTab({ client }: { client: Cliente }) {
   )
 }
 
-function PerfilCapilarTab({ client }: { client: Cliente }) {
-  const lastFicha = client.fichas?.[0]
-  const datos = lastFicha?.datos_especificos || lastFicha?.contenido
+function EvolucionTab({ client }: { client: Cliente }) {
+  const fichas = client.fichas ?? []
+
+  if (fichas.length === 0 && (client.historialCitas?.length ?? 0) === 0) {
+    return <div className="glw-empty-state">Sin datos de evolución</div>
+  }
+
+  const entries = fichas.length > 0
+    ? fichas.map(f => ({
+        date: fmtDateLong(f.fecha_ficha),
+        service: f.servicio_nombre || f.servicio || '—',
+        profesional: `${f.profesional_nombre || '—'} · ${f.sede_nombre || f.sede || ''}`,
+        notes: f.comentario_interno || f.notas_cliente || '',
+      }))
+    : client.historialCitas.map(h => ({
+        date: fmtDateLong(h.fecha),
+        service: h.servicio,
+        profesional: h.profesional,
+        notes: h.notas || '',
+      }))
+
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div>
+          <div className="glw-s-title" style={{ margin: '0 0 2px' }}>Evolución del cliente</div>
+          <div style={{ fontSize: 11.5, color: '#717171' }}>Seguimiento de servicios y sesiones</div>
+        </div>
+      </div>
+
+      <div className="glw-s-title">Registros</div>
+      {entries.map((ev, i) => (
+        <div key={i} className="glw-evo-entry">
+          <div className="glw-evo-entry-head">
+            <div>
+              <div className="glw-evo-entry-date">{ev.date}</div>
+              <div className="glw-evo-entry-svc">{ev.service}</div>
+            </div>
+            <div className="glw-evo-entry-prof">{ev.profesional}</div>
+          </div>
+          {ev.notes && (
+            <div className="glw-evo-notes">{ev.notes}</div>
+          )}
+        </div>
+      ))}
+    </>
+  )
+}
+
+function HistorialTab({ client, onFichaChanged }: { client: Cliente; onFichaChanged?: () => void }) {
   const { user } = useAuth()
   const [verTodas, setVerTodas] = useState(false)
   const [descargando, setDescargando] = useState<string | null>(null)
+  const [eliminandoId, setEliminandoId] = useState<string | null>(null)
+  const [fichaEditando, setFichaEditando] = useState<any>(null)
 
   const fichas = client.fichas ?? []
   const fichasMostradas = verTodas ? fichas : fichas.slice(0, 5)
+  const lastFicha = fichas[0]
+  const datosUltimaFicha = lastFicha?.datos_especificos || lastFicha?.contenido
 
-  const fichaRizotipo = fichas.find((f: any) => f.tipo_ficha === 'DIAGNOSTICO_RIZOTIPO')
-  const rizoDatos = fichaRizotipo?.datos_especificos || fichaRizotipo?.contenido
+  const historial = client.historialCitas ?? []
+  const total = historial.reduce((s, h) => {
+    const v = typeof h.valor_total === 'number' ? h.valor_total : Number(h.valor_total) || 0
+    return s + v
+  }, 0)
+
+  const getAuthToken = () =>
+    user?.access_token || localStorage.getItem('access_token') || sessionStorage.getItem('access_token') || ''
+
+  const [paquetes, setPaquetes] = useState<PaqueteCliente[]>([])
+
+  useEffect(() => {
+    const token = getAuthToken()
+    if (!token || !client.id) return
+    clientesService.obtenerPaquetesCliente(token, client.id)
+      .then(setPaquetes)
+      .catch(() => setPaquetes([]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client.id])
 
   const getDescargaId = (ficha: any): string | undefined =>
     ficha.contenido?.cita_id ||       // real cita_id first
@@ -188,6 +258,38 @@ function PerfilCapilarTab({ client }: { client: Cliente }) {
     ficha.cita_id ||
     ficha.id ||                        // ficha._id as last resort — backend detects this as a direct ficha lookup
     ficha._id
+
+  const handleEliminarFicha = async (ficha: any) => {
+    const fichaId = ficha._id || ficha.id
+    const token = getAuthToken()
+    if (!fichaId || !token) return
+
+    const confirmado = await confirmAction({
+      title: 'Eliminar ficha',
+      message: `¿Eliminar la ficha de ${ficha.servicio_nombre || ficha.servicio || 'este servicio'}? Esta acción no se puede deshacer.`,
+      confirmLabel: 'Sí, eliminar',
+      variant: 'danger',
+    })
+    if (!confirmado) return
+
+    setEliminandoId(fichaId)
+    try {
+      const response = await fetch(`${API_BASE_URL}scheduling/quotes/fichas/${fichaId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) {
+        const detalle = await response.json().catch(() => null)
+        throw new Error(detalle?.detail || `Error ${response.status} al eliminar la ficha`)
+      }
+      toast.success('Ficha eliminada')
+      onFichaChanged?.()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo eliminar la ficha')
+    } finally {
+      setEliminandoId(null)
+    }
+  }
 
   const handleDescargar = async (ficha: any) => {
     const token = user?.access_token || localStorage.getItem('access_token') || sessionStorage.getItem('access_token')
@@ -214,32 +316,39 @@ function PerfilCapilarTab({ client }: { client: Cliente }) {
     }
   }
 
+  if (historial.length === 0 && fichas.length === 0 && paquetes.length === 0) {
+    return <div className="glw-empty-state">Sin historial de servicios</div>
+  }
+
   return (
     <>
-      {/* Rizotipo */}
-      <div className="glw-s-title" style={{ marginTop: 0 }}>Rizotipo</div>
-      {rizoDatos ? (
-        <div className="glw-cap-grid">
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Exterior Lipídico</div><div className="glw-cap-card-value">{rizoDatos.exterior_lipidico_valor || rizoDatos.exterior_lipidico || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Porosidad</div><div className="glw-cap-card-value">{rizoDatos.porosidad_valor || rizoDatos.porosidad || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Permeabilidad</div><div className="glw-cap-card-value">{rizoDatos.permeabilidad_valor || rizoDatos.permeabilidad || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Plasticidad</div><div className="glw-cap-card-value">{rizoDatos.plasticidad_valor || rizoDatos.plasticidad || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Textura</div><div className="glw-cap-card-value">{rizoDatos.textura_valor || rizoDatos.textura || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Grosor</div><div className="glw-cap-card-value">{rizoDatos.grosor_valor || rizoDatos.grosor || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Oleosidad</div><div className="glw-cap-card-value">{rizoDatos.oleosidad_valor || rizoDatos.oleosidad || '—'}</div></div>
-          <div className="glw-cap-card"><div className="glw-cap-card-label">Densidad</div><div className="glw-cap-card-value">{rizoDatos.densidad_valor || rizoDatos.densidad || '—'}</div></div>
-          <div className="glw-cap-card" style={{ gridColumn: '1 / -1' }}><div className="glw-cap-card-label">Tipo de Textura</div><div className="glw-cap-card-value">{rizoDatos.tipo_textura || '—'}</div></div>
-        </div>
-      ) : (
-        <div className="glw-empty-state">Sin datos de rizotipo</div>
+      {paquetes.length > 0 && (
+        <>
+          <div className="glw-s-title" style={{ marginTop: 0 }}>Paquetes de sesiones activos</div>
+          <table className="glw-hist-table">
+            <thead>
+              <tr>
+                <th>Paquete</th>
+                <th>Sesiones restantes</th>
+                <th>Comprado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {paquetes.map((p) => (
+                <tr key={p.paquete_id}>
+                  <td>{p.nombre_servicio}</td>
+                  <td>{p.sesiones_restantes} de {p.sesiones_totales}</td>
+                  <td>{p.fecha_compra ? new Date(p.fecha_compra).toLocaleDateString() : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
 
-      {/* Fichas del cliente */}
-      <div className="glw-s-title">Fichas del cliente</div>
-      {fichas.length === 0 ? (
-        <div className="glw-empty-state">Sin fichas registradas</div>
-      ) : (
+      {fichas.length > 0 && (
         <>
+          <div className="glw-s-title" style={{ marginTop: 0 }}>Fichas registradas</div>
           <table className="glw-hist-table">
             <thead>
               <tr>
@@ -262,18 +371,35 @@ function PerfilCapilarTab({ client }: { client: Cliente }) {
                     <td>{ficha.profesional_nombre || '—'}</td>
                     <td>{ficha.sede_nombre || ficha.sede || '—'}</td>
                     <td style={{ textAlign: 'right' }}>
-                      {tieneCitaId ? (
+                      <div style={{ display: 'inline-flex', gap: 6 }}>
+                        {tieneCitaId ? (
+                          <button
+                            onClick={() => handleDescargar(ficha)}
+                            disabled={descargando === fichaKey}
+                            className="glw-btn glw-btn-sm"
+                            style={{ fontSize: 11 }}
+                          >
+                            {descargando === fichaKey ? 'Descargando...' : '↓ Descargar'}
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: 10, color: '#aaa', alignSelf: 'center' }}>—</span>
+                        )}
                         <button
-                          onClick={() => handleDescargar(ficha)}
-                          disabled={descargando === fichaKey}
+                          onClick={() => setFichaEditando(ficha)}
                           className="glw-btn glw-btn-sm"
                           style={{ fontSize: 11 }}
                         >
-                          {descargando === fichaKey ? 'Descargando...' : '↓ Descargar'}
+                          Editar
                         </button>
-                      ) : (
-                        <span style={{ fontSize: 10, color: '#aaa' }}>—</span>
-                      )}
+                        <button
+                          onClick={() => handleEliminarFicha(ficha)}
+                          disabled={eliminandoId === fichaKey}
+                          className="glw-btn glw-btn-sm"
+                          style={{ fontSize: 11, color: '#b83030', borderColor: '#f0d0d0' }}
+                        >
+                          {eliminandoId === fichaKey ? 'Eliminando...' : 'Eliminar'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -289,121 +415,74 @@ function PerfilCapilarTab({ client }: { client: Cliente }) {
               {verTodas ? 'Ver menos' : `Ver todas (${fichas.length})`}
             </button>
           )}
-        </>
-      )}
 
-      {/* Recomendaciones */}
-      {datos?.recomendaciones_personalizadas && (
-        <>
-          <div className="glw-s-title">Recomendaciones del especialista</div>
-          <div className="glw-nota">
-            <div className="glw-nota-text">{datos.recomendaciones_personalizadas}</div>
-          </div>
-        </>
-      )}
-    </>
-  )
-}
-
-function EvolucionTab({ client }: { client: Cliente }) {
-  const fichas = client.fichas ?? []
-
-  if (fichas.length === 0 && (client.historialCitas?.length ?? 0) === 0) {
-    return <div className="glw-empty-state">Sin datos de evolución</div>
-  }
-
-  const entries = fichas.length > 0
-    ? fichas.map(f => ({
-        date: fmtDateLong(f.fecha_ficha),
-        service: f.servicio_nombre || f.servicio || '—',
-        profesional: `${f.profesional_nombre || '—'} · ${f.sede_nombre || f.sede || ''}`,
-        notes: f.comentario_interno || f.notas_cliente || '',
-      }))
-    : client.historialCitas.map(h => ({
-        date: fmtDateLong(h.fecha),
-        service: h.servicio,
-        profesional: h.profesional,
-        notes: h.notas || '',
-      }))
-
-  return (
-    <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-        <div>
-          <div className="glw-s-title" style={{ margin: '0 0 2px' }}>Progreso del cabello</div>
-          <div style={{ fontSize: 11.5, color: '#717171' }}>Seguimiento de indicadores capilares</div>
-        </div>
-      </div>
-
-      <div className="glw-s-title">Registros</div>
-      {entries.map((ev, i) => (
-        <div key={i} className="glw-evo-entry">
-          <div className="glw-evo-entry-head">
-            <div>
-              <div className="glw-evo-entry-date">{ev.date}</div>
-              <div className="glw-evo-entry-svc">{ev.service}</div>
-            </div>
-            <div className="glw-evo-entry-prof">{ev.profesional}</div>
-          </div>
-          {ev.notes && (
-            <div className="glw-evo-notes">{ev.notes}</div>
+          {datosUltimaFicha?.recomendaciones_personalizadas && (
+            <>
+              <div className="glw-s-title">Recomendaciones del especialista</div>
+              <div className="glw-nota">
+                <div className="glw-nota-text">{datosUltimaFicha.recomendaciones_personalizadas}</div>
+              </div>
+            </>
           )}
-        </div>
-      ))}
+        </>
+      )}
+
+      {historial.length > 0 && (
+        <>
+          <div
+            style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginBottom: 14, marginTop: fichas.length > 0 ? 24 : 0,
+            }}
+          >
+            <div className="glw-s-title" style={{ margin: 0 }}>Historial completo</div>
+            <span style={{ fontSize: 11.5, color: '#717171' }}>{historial.length} visitas · {fmt(total)}</span>
+          </div>
+          <table className="glw-hist-table">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Servicio</th>
+                <th>Profesional</th>
+                <th>Estado</th>
+                <th style={{ textAlign: 'right' }}>Valor</th>
+              </tr>
+            </thead>
+            <tbody>
+              {historial.map((h, i) => (
+                <tr key={i}>
+                  <td>{fmtDate(h.fecha)}</td>
+                  <td>
+                    <div style={{ fontWeight: 500 }}>{h.servicio}</div>
+                  </td>
+                  <td>{h.profesional}</td>
+                  <td>
+                    <span className={`glw-tag ${h.estado_pago === 'pagado' ? 'tag-green' : 'tag-gray'}`}>
+                      {h.estado_pago === 'pagado' ? 'Facturada' : h.estado_pago || h.estado || 'Pendiente'}
+                    </span>
+                  </td>
+                  <td style={{ textAlign: 'right', fontWeight: 600 }}>
+                    {typeof h.valor_total === 'number' ? fmt(h.valor_total) : h.valor_total || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {fichaEditando && (
+        <FichaEditModal
+          ficha={fichaEditando}
+          token={getAuthToken()}
+          onClose={() => setFichaEditando(null)}
+          onSaved={() => onFichaChanged?.()}
+        />
+      )}
     </>
   )
 }
 
-function HistorialTab({ client }: { client: Cliente }) {
-  const historial = client.historialCitas ?? []
-  const total = historial.reduce((s, h) => {
-    const v = typeof h.valor_total === 'number' ? h.valor_total : Number(h.valor_total) || 0
-    return s + v
-  }, 0)
-
-  if (historial.length === 0) {
-    return <div className="glw-empty-state">Sin historial de servicios</div>
-  }
-
-  return (
-    <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-        <div className="glw-s-title" style={{ margin: 0 }}>Historial completo</div>
-        <span style={{ fontSize: 11.5, color: '#717171' }}>{historial.length} visitas · {fmt(total)}</span>
-      </div>
-      <table className="glw-hist-table">
-        <thead>
-          <tr>
-            <th>Fecha</th>
-            <th>Servicio</th>
-            <th>Profesional</th>
-            <th>Estado</th>
-            <th style={{ textAlign: 'right' }}>Valor</th>
-          </tr>
-        </thead>
-        <tbody>
-          {historial.map((h, i) => (
-            <tr key={i}>
-              <td>{fmtDate(h.fecha)}</td>
-              <td>
-                <div style={{ fontWeight: 500 }}>{h.servicio}</div>
-              </td>
-              <td>{h.profesional}</td>
-              <td>
-                <span className={`glw-tag ${h.estado_pago === 'pagado' ? 'tag-green' : 'tag-gray'}`}>
-                  {h.estado_pago === 'pagado' ? 'Facturada' : h.estado_pago || h.estado || 'Pendiente'}
-                </span>
-              </td>
-              <td style={{ textAlign: 'right', fontWeight: 600 }}>
-                {typeof h.valor_total === 'number' ? fmt(h.valor_total) : h.valor_total || '—'}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
-  )
-}
 
 function NotasTab({ client, onNoteAdded }: { client: Cliente; onNoteAdded?: () => void }) {
   const { user } = useAuth()
@@ -481,9 +560,9 @@ function NotasTab({ client, onNoteAdded }: { client: Cliente; onNoteAdded?: () =
 export function ClientDetail({ client, isOpen, onClose, onClientUpdated }: ClientDetailProps) {
   const [tab, setTab] = useState<Tab>('resumen')
   const [isEditOpen, setIsEditOpen] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
   const navigate = useNavigate()
   const { user: authUser } = useAuth()
-  const { features } = useTenantConfig()
   const token = (authUser as any)?.access_token || sessionStorage.getItem("access_token") || localStorage.getItem("access_token") || ""
 
   const handleWhatsApp = useCallback(() => {
@@ -491,6 +570,29 @@ export function ClientDetail({ client, isOpen, onClose, onClientUpdated }: Clien
       window.open(whatsappUrl(client.telefono), '_blank', 'noopener,noreferrer')
     }
   }, [client.telefono])
+
+  const handleEliminarCliente = useCallback(async () => {
+    if (!token) return
+    const confirmado = await confirmAction({
+      title: 'Eliminar cliente',
+      message: `¿Eliminar a ${client.nombre}? No se borra su historial de citas, fichas ni facturación — deja de aparecer en las listas, pero se puede reactivar más adelante.`,
+      confirmLabel: 'Sí, eliminar',
+      variant: 'danger',
+    })
+    if (!confirmado) return
+
+    setIsDeleting(true)
+    try {
+      await clientesService.eliminarCliente(token, client.id)
+      toast.success('Cliente eliminado')
+      onClientUpdated?.()
+      onClose()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo eliminar el cliente')
+    } finally {
+      setIsDeleting(false)
+    }
+  }, [token, client.id, client.nombre, onClientUpdated, onClose])
 
   const handleAgendarCita = useCallback(() => {
     navigate('/agenda', {
@@ -502,10 +604,8 @@ export function ClientDetail({ client, isOpen, onClose, onClientUpdated }: Clien
     })
   }, [navigate, client.nombre, client.id, client.telefono])
 
-  // El tab Perfil Capilar se alimenta 100% de fichas técnicas; se oculta con el flag apagado
   const tabs: { key: Tab; label: string }[] = [
     { key: 'resumen', label: 'Resumen' },
-    ...(features.fichasTecnicas ? [{ key: 'perfil' as Tab, label: 'Perfil Capilar' }] : []),
     { key: 'evolucion', label: 'Evolución' },
     { key: 'historial', label: 'Historial' },
     { key: 'notas', label: 'Notas' },
@@ -536,6 +636,14 @@ export function ClientDetail({ client, isOpen, onClose, onClientUpdated }: Clien
             <div className="glw-panel-actions">
               <button className="glw-btn glw-btn-sm" onClick={handleWhatsApp}>WhatsApp</button>
               <button className="glw-btn glw-btn-sm" onClick={() => setIsEditOpen(true)}>Editar</button>
+              <button
+                className="glw-btn glw-btn-sm"
+                onClick={handleEliminarCliente}
+                disabled={isDeleting}
+                style={{ color: '#dc2626' }}
+              >
+                {isDeleting ? 'Eliminando...' : 'Eliminar'}
+              </button>
               <button className="glw-btn glw-btn-sm glw-btn-primary" onClick={handleAgendarCita}>Agendar cita</button>
             </div>
           </div>
@@ -558,9 +666,8 @@ export function ClientDetail({ client, isOpen, onClose, onClientUpdated }: Clien
         {/* Panel body */}
         <div className="glw-panel-body">
           {tab === 'resumen' && <ResumenTab client={client} />}
-          {tab === 'perfil' && <PerfilCapilarTab client={client} />}
           {tab === 'evolucion' && <EvolucionTab client={client} />}
-          {tab === 'historial' && <HistorialTab client={client} />}
+          {tab === 'historial' && <HistorialTab client={client} onFichaChanged={onClientUpdated} />}
           {tab === 'notas' && <NotasTab client={client} onNoteAdded={onClientUpdated} />}
         </div>
       </div>
