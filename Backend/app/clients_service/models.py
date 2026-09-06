@@ -48,6 +48,12 @@ class Cliente(BaseModel):
     total_gastado: Optional[float] = None        # ← new
     ticket_promedio: Optional[float] = None      # ← new
     dias_sin_visitar: Optional[int] = None       # ← new
+    activo: Optional[bool] = None
+    # ↑ default None (no True): editar_cliente hace exclude_none=True, así que
+    # dejarlo en None evita que cada edición normal reactive silenciosamente
+    # a un cliente que un admin acababa de desactivar. Solo se toca cuando
+    # alguien lo manda explícito (DELETE /{id} lo pone en False; reactivar es
+    # un PUT con {"activo": true}).
 
     @field_validator("nombre", mode="before")
     @classmethod

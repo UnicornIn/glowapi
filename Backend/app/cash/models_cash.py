@@ -195,6 +195,10 @@ class IngresoResponse(BaseModel):
     registrado_por: str
     registrado_por_nombre: Optional[str]
     creado_en: datetime
+    # Clasificación contable (poblada por los POST de finanzas_movimientos).
+    # Permite al frontend distinguir caja mayor vs caja menor sin heurísticas.
+    caja: Optional[str] = None          # "caja_mayor" | "caja_menor"
+    origen: Optional[str] = None        # "manual_caja_mayor" | "manual_caja_menor"
 
 class CierreResponse(BaseModel):
     cierre_id: str

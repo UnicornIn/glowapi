@@ -2,8 +2,10 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from app.clients_service.models import Cliente, NotaCliente, ClientesPaginados, CalificacionRequest, CalificacionValor
 from app.database.mongo import (
     collection_clients, collection_citas, collection_card,
-    collection_servicios, collection_locales, collection_estilista, collection_sales
+    collection_servicios, collection_locales, collection_estilista, collection_sales,
+    collection_client_packages
 )
+from pydantic import BaseModel, Field
 from app.auth.routes import get_current_user
 from app.id_generator.generator import generar_id
 from pymongo.errors import DuplicateKeyError
@@ -228,7 +230,11 @@ def _aplicar_filtro_cedula(clientes: List[dict], termino: str) -> List[dict]:
  
 async def _get_query_base(rol: str, current_user: dict) -> dict:
     """Construye el filtro base de franquicia/sede según el rol."""
-    query_base = {}
+    query_base = {
+        # Clientes existentes nunca tuvieron este campo → tratar "sin campo"
+        # como activo (mismo patrón que estilistas/servicios en este proyecto).
+        "activo": {"$ne": False},
+    }
     if rol in ["admin_sede", "estilista", "call_center", "recepcionista"]:
         sede_id = current_user.get("sede_id")
         if not sede_id:
@@ -807,7 +813,9 @@ async def listar_por_id(
             if id != current_user.get("sede_id"):
                 raise HTTPException(403, "No tiene permisos para ver esos clientes")
 
-        clientes = await collection_clients.find({"sede_id": id}).to_list(None)
+        clientes = await collection_clients.find(
+            {"sede_id": id, "activo": {"$ne": False}}
+        ).to_list(None)
         return [cliente_to_dict(c) for c in clientes]
 
     except HTTPException:
@@ -924,6 +932,65 @@ async def editar_cliente(
 
 
 # ============================================================
+# ELIMINAR CLIENTE (SOFT DELETE)
+# ============================================================
+@router.delete("/{id}", response_model=dict)
+async def eliminar_cliente(
+    id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Desactiva un cliente (soft delete) — mismo patrón que profesionales,
+    servicios, etc. en este proyecto: se marca `activo: False` en vez de
+    borrar el documento, para no perder el historial de citas/fichas/
+    facturación que ya apuntan a este cliente_id.
+
+    No revierte nada más (igual que `eliminar_salida`/`eliminar_profesional`):
+    el cliente desaparece de listados y búsquedas, pero sus citas/fichas/
+    facturas históricas siguen intactas y consultables por su cliente_id.
+
+    Para reactivar: PUT /clientes/{id} con {"activo": true}.
+    """
+    rol = current_user.get("rol")
+    if rol not in ["admin_sede", "super_admin", "call_center", "recepcionista"]:
+        raise HTTPException(403, "No autorizado")
+
+    cliente = await collection_clients.find_one({"cliente_id": id})
+    if not cliente:
+        try:
+            cliente = await collection_clients.find_one({"_id": ObjectId(id)})
+        except Exception:
+            pass
+
+    if not cliente:
+        raise HTTPException(404, "Cliente no encontrado")
+
+    # Misma validación de acceso por franquicia/sede que editar_cliente
+    if rol == "admin_sede":
+        user_sede_id = current_user.get("sede_id")
+        user_franquicia_id = await _get_franquicia_id_de_sede(user_sede_id)
+        cliente_franquicia_id = cliente.get("franquicia_id")
+
+        tiene_acceso = (
+            (user_franquicia_id and user_franquicia_id == cliente_franquicia_id) or
+            cliente.get("sede_id") == user_sede_id
+        )
+        if not tiene_acceso:
+            raise HTTPException(403, "No autorizado")
+
+    await collection_clients.update_one(
+        {"_id": cliente["_id"]},
+        {"$set": {
+            "activo": False,
+            "deleted_at": datetime.now(),
+            "deleted_by": current_user.get("email"),
+        }}
+    )
+
+    return {"success": True, "msg": "Cliente desactivado correctamente"}
+
+
+# ============================================================
 # AGREGAR NOTA
 # ============================================================
 @router.post("/{id}/notas", response_model=dict)
@@ -984,6 +1051,79 @@ async def historial_cliente(
     except Exception as e:
         logger.error(f"Error historial cliente: {e}")
         raise HTTPException(500, "Error al obtener historial")
+
+
+# ============================================================
+# PAQUETES DE SESIONES DEL CLIENTE
+# ============================================================
+@router.get("/{id}/paquetes", response_model=List[dict])
+async def paquetes_cliente(
+    id: str,
+    solo_activos: bool = True,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Lista los paquetes de sesiones prepagas del cliente (ej. "5 sesiones de
+    Terapia individual piso pélvico") con su saldo restante. Los crea
+    automáticamente el backend al facturar una cita que compra un paquete
+    (`comprar_paquete_sesiones` en la línea del servicio, ver
+    app.bills.routes) — no hay un endpoint para crearlos a mano. Usado por
+    "Nueva Cita" (ofrecer "usar sesión del paquete" al agendar) y por el
+    detalle del cliente (mostrar saldo).
+    """
+    rol = current_user.get("rol")
+    if rol not in ["admin_sede", "super_admin", "estilista", "call_center", "recepcionista"]:
+        raise HTTPException(403, "No autorizado")
+
+    query: dict = {"cliente_id": id}
+    if solo_activos:
+        query["activo"] = True
+        query["sesiones_restantes"] = {"$gt": 0}
+
+    paquetes = await collection_client_packages.find(query).sort("fecha_compra", -1).to_list(None)
+    for p in paquetes:
+        p["_id"] = str(p["_id"])
+    return paquetes
+
+
+class AjustarPaqueteRequest(BaseModel):
+    sesiones_restantes: int = Field(..., ge=0)
+    motivo: str
+
+
+@router.patch("/paquetes/{paquete_id}/ajustar", response_model=dict)
+async def ajustar_paquete(
+    paquete_id: str,
+    data: AjustarPaqueteRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Corrección manual del saldo de un paquete (ej. reception se equivocó al
+    vender/canjear). Deja rastro en historial_uso — no sobreescribe en
+    silencio, mismo criterio que "corregir_pago" en citas.
+    """
+    if current_user.get("rol") not in ["admin_sede", "super_admin"]:
+        raise HTTPException(403, "No autorizado para ajustar paquetes de sesiones")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+
+    await collection_client_packages.update_one(
+        {"paquete_id": paquete_id},
+        {
+            "$set": {"sesiones_restantes": data.sesiones_restantes},
+            "$push": {"historial_uso": {
+                "ajuste_manual": True,
+                "motivo": data.motivo,
+                "sesiones_restantes_antes": paquete.get("sesiones_restantes"),
+                "sesiones_restantes_despues": data.sesiones_restantes,
+                "usuario": current_user.get("email"),
+                "fecha": datetime.now(),
+            }},
+        },
+    )
+    return {"success": True, "paquete_id": paquete_id, "sesiones_restantes": data.sesiones_restantes}
 
 
 # ============================================================
@@ -1077,7 +1217,9 @@ async def get_clientes_mi_sede(
     if not sede_usuario:
         raise HTTPException(400, "El usuario autenticado no tiene una sede asignada")
 
-    clientes_cursor = collection_clients.find({"sede_id": sede_usuario}, {"_id": 0})
+    clientes_cursor = collection_clients.find(
+        {"sede_id": sede_usuario, "activo": {"$ne": False}}, {"_id": 0}
+    )
     return await clientes_cursor.to_list(length=None)
 
 # ─── ENDPOINT PUT ────────────────────────────────────────────────

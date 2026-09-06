@@ -26,7 +26,8 @@ from app.database.mongo import (
     collection_inventory_reports,
     collection_auth,
     collection_productos,
-    collection_estilista
+    collection_estilista,
+    collection_client_packages
 )
 from app.auth.routes import get_current_user
 
@@ -97,26 +98,39 @@ def obtener_porcentaje_comision_producto(
 def _obtener_porcentaje_comision_servicio(servicio_db: dict, profesional_db: Optional[dict]) -> float:
     """
     Prioridad:
-    1) comisión por categoría del estilista (si existe y coincide)
-    2) comisión fija del servicio (comision_estilista)
+    1) comisión por servicio específico (comisiones_por_servicio[servicio_id]
+       del profesional) — la más específica, gana si está configurada.
+    2) comisión por categoría del estilista (comisiones_por_categoria) —
+       respaldo cuando el servicio no tiene su propia comisión configurada.
+    3) 0, si ninguna de las dos aplica.
+
+    NOTA: `comision_estilista` (campo fijo en el propio documento del
+    servicio) está deprecado y ya NO se usa para resolver comisión — el
+    dato vive en el profesional, no en el servicio.
     """
-    if profesional_db:
-        comisiones_categoria = profesional_db.get("comisiones_por_categoria") or {}
-        categoria_servicio = _normalizar_categoria(servicio_db.get("categoria"))
-        print(f"🔍 categoria_servicio='{categoria_servicio}' | claves={list(comisiones_categoria.keys())}")
+    if not profesional_db:
+        return 0.0
 
-        if categoria_servicio and isinstance(comisiones_categoria, dict):
-            for categoria, porcentaje in comisiones_categoria.items():
-                if _normalizar_categoria(categoria) == categoria_servicio:
-                    try:
-                        return float(porcentaje)
-                    except (TypeError, ValueError):
-                        break
+    servicio_id = servicio_db.get("servicio_id") or servicio_db.get("unique_id")
+    comisiones_servicio = profesional_db.get("comisiones_por_servicio") or {}
+    if servicio_id and isinstance(comisiones_servicio, dict) and servicio_id in comisiones_servicio:
+        try:
+            return float(comisiones_servicio[servicio_id])
+        except (TypeError, ValueError):
+            pass
 
-    try:
-        return float(servicio_db.get("comision_estilista", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    comisiones_categoria = profesional_db.get("comisiones_por_categoria") or {}
+    categoria_servicio = _normalizar_categoria(servicio_db.get("categoria"))
+
+    if categoria_servicio and isinstance(comisiones_categoria, dict):
+        for categoria, porcentaje in comisiones_categoria.items():
+            if _normalizar_categoria(categoria) == categoria_servicio:
+                try:
+                    return float(porcentaje)
+                except (TypeError, ValueError):
+                    break
+
+    return 0.0
 
 def _limpiar(obj):
     """Serializa ObjectId y datetime recursivamente."""
@@ -426,22 +440,28 @@ async def _ejecutar_anulacion(
         email_usuario=email_usuario,
     )
  
-    # 5️⃣ Actualizar cita origen si aplica
+    # 5️⃣ Actualizar cita origen si aplica — vuelve a "finalizado" (el
+    # servicio SÍ se prestó, eso no lo borra la anulación de la factura) y
+    # `estado_factura` deja de ser "facturado" para poder corregir el
+    # servicio o el historial de pago y volver a facturar. A propósito NO
+    # se tocan `abono`/`saldo_pendiente`/`historial_pagos` de la cita —
+    # siguen reflejando lo que el cliente realmente pagó hasta ahora; si
+    # ese registro también estaba mal, se corrige aparte con
+    # `PATCH /pagos/{indice}`, no se resetea acá.
     cita_actualizada = False
     if tipo_origen == "cita" and origen_id:
         try:
             await collection_citas.update_one(
                 {"_id": ObjectId(origen_id)},
                 {"$set": {
-                    "estado": "cancelada",
-                    "estado_pago": "anulado",
-                    "estado_factura": "anulado",
+                    "estado": "finalizado",
+                    "estado_factura": "pendiente",
                     "fecha_anulacion_factura": fecha_actual,
                     "anulado_por": email_usuario,
                 }},
             )
             cita_actualizada = True
-            print(f"📅 Cita {origen_id} marcada como cancelada por anulación")
+            print(f"📅 Cita {origen_id} vuelta a 'finalizado' por anulación de factura")
         except Exception as e:
             print(f"⚠️ No se pudo actualizar cita {origen_id}: {e}")
  
@@ -544,16 +564,35 @@ async def facturar_cita_o_venta(
             precio = servicio_item.get("precio", 0)          # precio unitario
             cantidad = int(servicio_item.get("cantidad", 1)) # ← leer cantidad real
             subtotal = servicio_item.get("subtotal", round(precio * cantidad, 2))  # ← usar subtotal guardado
+            paquete_id_redimido = servicio_item.get("paquete_id")  # ⭐ sesión cubierta por un paquete ya vendido
+            comprar_paquete_sesiones = servicio_item.get("comprar_paquete_sesiones")  # ⭐ esta cita compra un paquete nuevo
+
+            # ⭐ FIX: consultar el servicio siempre (no solo si hay comisión por
+            # servicios) — se necesita también para el nombre de categoría del item.
+            servicio_db = await collection_servicios.find_one({"servicio_id": servicio_id})
+
+            # ⭐ PAQUETES DE SESIONES — base real de comisión: tanto al canjear
+            # una sesión de un paquete ya vendido como al comprar uno nuevo (esa
+            # primera sesión se descuenta de inmediato), el subtotal de la línea
+            # no es lo que corresponde comisionar — se comisiona siempre sobre
+            # el valor de UNA sesión, no sobre 0 ni sobre el precio total del
+            # paquete completo.
+            base_comision = subtotal
+            valor_por_sesion_nuevo = None
+            if paquete_id_redimido:
+                paquete_redimido_doc = await collection_client_packages.find_one({"paquete_id": paquete_id_redimido})
+                if paquete_redimido_doc:
+                    base_comision = round(float(paquete_redimido_doc.get("valor_por_sesion", 0)) * cantidad, 2)
+            elif comprar_paquete_sesiones:
+                valor_por_sesion_nuevo = round(subtotal / comprar_paquete_sesiones, 2) if comprar_paquete_sesiones else 0
+                base_comision = valor_por_sesion_nuevo
 
             comision_servicio = 0
-            servicio_db = None          # ⭐ FIX: inicializar — puede no consultarse (ej. comisión por "productos")
             comision_porcentaje = 0     # ⭐ FIX: inicializar — evita UnboundLocalError
-            if tipo_comision in ["servicios", "mixto"] and profesional_id:
-                servicio_db = await collection_servicios.find_one({"servicio_id": servicio_id})
-                if servicio_db:
-                    comision_porcentaje = _obtener_porcentaje_comision_servicio(servicio_db, profesional_db)
-                    comision_servicio = round((subtotal * comision_porcentaje) / 100, 2)  # ← sobre subtotal
-                    total_comision_servicios += comision_servicio
+            if tipo_comision in ["servicios", "mixto"] and profesional_id and servicio_db:
+                comision_porcentaje = _obtener_porcentaje_comision_servicio(servicio_db, profesional_db)
+                comision_servicio = round((base_comision * comision_porcentaje) / 100, 2)  # ← sobre la base real
+                total_comision_servicios += comision_servicio
 
             items.append({
                 "tipo": "servicio",
@@ -565,9 +604,67 @@ async def facturar_cita_o_venta(
                 "precio_unitario": precio,
                 "subtotal": subtotal,           # ← subtotal real
                 "moneda": moneda_sede,
-                "comision": comision_servicio
+                "comision": comision_servicio,
+                **({"pagado_con_paquete": paquete_id_redimido} if paquete_id_redimido else {}),
             })
             print(f"  ✅ {nombre}: ${precio} (comisión: ${comision_servicio})")
+
+            # ⭐ Redimir la sesión del paquete — decremento atómico y con
+            # validación dura (a diferencia del chequeo "blando" al agendar):
+            # si para cuando se factura el paquete ya no tiene saldo (ej. se
+            # redimió en otra cita primero), se rechaza la facturación de esta
+            # línea en vez de dejarla pasar "gratis" sin respaldo de saldo.
+            if paquete_id_redimido:
+                redencion = await collection_client_packages.update_one(
+                    {"paquete_id": paquete_id_redimido, "sesiones_restantes": {"$gte": cantidad}},
+                    {
+                        "$inc": {"sesiones_restantes": -cantidad, "sesiones_usadas": cantidad},
+                        "$push": {"historial_uso": {
+                            "cita_id": id,
+                            "fecha": datetime.now(),
+                            "profesional_id": profesional_id,
+                            "sesiones": cantidad,
+                        }},
+                    },
+                )
+                if redencion.matched_count == 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"El paquete de sesiones ya no tiene saldo suficiente para facturar '{nombre}'. Corrige el pago de esta cita antes de facturar."
+                    )
+
+            # ⭐ Si esta línea compra un paquete de sesiones nuevo, crear el
+            # saldo del cliente al confirmarse la venta — este es el único
+            # punto donde un paquete nace. La primera sesión (esta misma
+            # cita) queda descontada de inmediato: el cliente vino, pagó el
+            # paquete completo y ya usó una sesión hoy.
+            if comprar_paquete_sesiones:
+                sesiones_totales = int(comprar_paquete_sesiones)
+                await collection_client_packages.insert_one({
+                    "paquete_id": f"PKG-{random.randint(10000, 99999)}",
+                    "cliente_id": cliente_id,
+                    "sede_id": sede_id,
+                    "servicio_id": servicio_id,
+                    "nombre_servicio": nombre,
+                    "sesiones_totales": sesiones_totales,
+                    "sesiones_usadas": 1,
+                    "sesiones_restantes": max(sesiones_totales - 1, 0),
+                    "valor_por_sesion": valor_por_sesion_nuevo,
+                    "moneda": moneda_sede,
+                    "activo": True,
+                    "fecha_compra": datetime.now(),
+                    "cita_origen_id": id if tipo == "cita" else None,
+                    "venta_origen_id": id if tipo == "venta" else None,
+                    "creado_por": current_user.get("email"),
+                    "historial_uso": [{
+                        "cita_id": id,
+                        "fecha": datetime.now(),
+                        "profesional_id": profesional_id,
+                        "sesiones": 1,
+                        "nota": "Primera sesión del paquete, incluida en la compra",
+                    }],
+                })
+                print(f"  🎟️ Paquete de {sesiones_totales} sesiones creado para cliente {cliente_id} ({nombre}), 1 sesión ya consumida")
 
     elif documento.get("servicio_id"):
         # Estructura muy antigua (un solo servicio)
@@ -600,7 +697,10 @@ async def facturar_cita_o_venta(
 
         comision_servicio = 0
         if tipo_comision in ["servicios", "mixto"] and profesional_id:
-            comision_porcentaje = servicio.get("comision_estilista", 0)
+            # Misma resolución servicio→categoría que la estructura nueva (arriba),
+            # en vez de leer comision_estilista directo: evita que una cita con un
+            # solo servicio liquide distinto que una con varios servicios.
+            comision_porcentaje = _obtener_porcentaje_comision_servicio(servicio, profesional_db)
             comision_servicio = round((precio_servicio * comision_porcentaje) / 100, 2)
             total_comision_servicios = comision_servicio
 
@@ -1732,7 +1832,24 @@ async def anular_factura(
  
     if doc_invoice.get("estado") == "anulado":
         raise HTTPException(status_code=400, detail="Esta factura ya está anulada")
- 
+
+    # Si la factura ya se emitió de verdad ante el proveedor de facturación
+    # electrónica (Alegra), anularla acá adentro NO anula nada del lado
+    # fiscal/tributario — dejaría el registro interno y el electrónico
+    # desincronizados. Eso requiere una nota crédito o el flujo de
+    # anulación propio de Alegra, no está implementado — se bloquea acá
+    # en vez de fingir que "anular" ya cubre ese caso.
+    estado_electronico = (doc_invoice.get("electronic_invoice") or {}).get("status")
+    if estado_electronico == "submitted":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Esta factura ya fue emitida como factura electrónica (Alegra) — "
+                "no se puede anular solo internamente sin dejarla desincronizada "
+                "del lado fiscal. Debe anularse/corregirse primero desde Alegra."
+            ),
+        )
+
     # Buscar venta asociada por numero_comprobante
     doc_sale = None
     numero_comprobante = doc_invoice.get("numero_comprobante")
@@ -1741,11 +1858,11 @@ async def anular_factura(
             "numero_comprobante": numero_comprobante,
             "sede_id": doc_invoice.get("sede_id"),
         })
- 
+
     sede = await collection_locales.find_one({"sede_id": doc_invoice.get("sede_id")})
     if not sede:
         raise HTTPException(status_code=404, detail="Sede no encontrada")
- 
+
     resumen = await _ejecutar_anulacion(
         doc_sale=doc_sale,
         doc_invoice=doc_invoice,
@@ -1754,7 +1871,7 @@ async def anular_factura(
         rol_usuario=current_user.get("rol"),
         motivo=body.motivo,
     )
- 
+
     return {
         "success": True,
         "message": "Factura anulada correctamente",
@@ -1764,4 +1881,39 @@ async def anular_factura(
         "motivo": body.motivo,
         "reversiones": resumen,
     }
+
+
+@router.delete("/sales/{sale_id}/anular")
+async def anular_factura_desde_venta(
+    sale_id: str,
+    body: AnulacionRequest = AnulacionRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Igual que `DELETE /{invoice_id}/anular`, pero identificando la factura
+    por el id de la venta/cita ya facturada — el frontend solo conoce ese
+    id (`venta_id`/`origen_id`), no el `_id` interno de `collection_invoices`.
+    Mismo patrón que `emitir_factura_electronica_desde_venta`.
+    """
+    try:
+        sale_mongo_id = ObjectId(sale_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="sale_id inválido") from exc
+
+    venta = await collection_sales.find_one({"_id": sale_mongo_id})
+    if not venta:
+        raise HTTPException(status_code=404, detail="Venta no encontrada")
+
+    numero_comprobante = venta.get("numero_comprobante")
+    sede_id = venta.get("sede_id")
+    if not numero_comprobante:
+        raise HTTPException(status_code=422, detail="La venta no tiene numero_comprobante")
+
+    invoice = await collection_invoices.find_one(
+        {"numero_comprobante": numero_comprobante, "sede_id": sede_id}
+    )
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Factura interna asociada no encontrada")
+
+    return await anular_factura(str(invoice["_id"]), body, current_user)
  
