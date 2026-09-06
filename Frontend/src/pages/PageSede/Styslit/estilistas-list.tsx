@@ -56,7 +56,7 @@ export function EstilistasList({
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500" />
           <input
             type="text"
-            placeholder="Buscar estilistas..."
+            placeholder="Buscar profesionales..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-9 pr-8 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:border-black focus:ring-0"
@@ -112,7 +112,7 @@ export function EstilistasList({
           <p className="text-xs text-gray-600">
             <span className="font-medium">{filteredEstilistas.length}</span> de{" "}
             <span className="font-medium">{safeEstilistas.length}</span>{" "}
-            estilistas
+            profesionales
           </p>
           {filterActive !== null && (
             <button
@@ -131,7 +131,7 @@ export function EstilistasList({
         {filteredEstilistas.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-40 text-gray-400">
             <User className="h-6 w-6 mb-1.5" />
-            <p className="text-xs">No se encontraron estilistas</p>
+            <p className="text-xs">No se encontraron profesionales</p>
             {searchTerm && (
               <button
                 onClick={() => setSearchTerm("")}
@@ -227,7 +227,7 @@ export function EstilistasList({
                         onClick={(e) => handleEdit(estilista, e)}
                         className="p-2 rounded-md hover:bg-gray-200 active:scale-95 transition-all"
 
-                        title="Editar estilista"
+                        title="Editar profesional"
                       >
                         <Edit2 className="h-3 w-3 text-gray-500 hover:text-gray-700" />
                       </button>

@@ -21,7 +21,7 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
         <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-4">
           <User className="h-8 w-8 text-gray-400" />
         </div>
-        <h3 className="text-lg font-medium text-gray-900 mb-2">No hay datos del estilista</h3>
+        <h3 className="text-lg font-medium text-gray-900 mb-2">No hay datos del profesional</h3>
         <p className="text-sm text-gray-600 text-center max-w-sm">
           Selecciona un estilista de la lista para ver sus detalles
         </p>
@@ -47,7 +47,7 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
   }
 
   const handleDelete = async () => {
-    const confirmed = await confirmAction({ title: "Confirmar", message: `¿Estás seguro de que quieres eliminar a ${estilista.nombre || 'este estilista'}?`, confirmLabel: "Sí, eliminar", variant: "danger" });
+    const confirmed = await confirmAction({ title: "Confirmar", message: `¿Estás seguro de que quieres eliminar a ${estilista.nombre || 'este profesional'}?`, confirmLabel: "Sí, eliminar", variant: "danger" });
     if (confirmed) {
       onDelete?.(estilista)
     }
@@ -69,7 +69,11 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
                 {estilista.nombre || 'Nombre no disponible'}
               </h1>
               <p className="text-sm text-gray-600 mt-0.5">
-                {estilista.rol ? estilista.rol.charAt(0).toUpperCase() + estilista.rol.slice(1) : 'Rol no disponible'}
+                {estilista.rol === 'estilista'
+                  ? 'Profesional'
+                  : estilista.rol
+                    ? estilista.rol.charAt(0).toUpperCase() + estilista.rol.slice(1)
+                    : 'Rol no disponible'}
               </p>
             </div>
           </div>
@@ -191,7 +195,7 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
             <div className="space-y-3">
               <div>
                 <p className="text-xs text-gray-500 mb-1">Rol</p>
-                <p className="text-sm text-gray-900 capitalize">{estilista.rol || 'No definido'}</p>
+                <p className="text-sm text-gray-900 capitalize">{estilista.rol === 'estilista' ? 'Profesional' : estilista.rol || 'No definido'}</p>
               </div>
               {estilista.created_by && (
                 <div>

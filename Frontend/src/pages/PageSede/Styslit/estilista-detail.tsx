@@ -17,7 +17,7 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
   if (!estilista) {
     return (
       <div className="flex h-full items-center justify-center text-gray-500">
-        No hay datos del estilista disponibles
+        No hay datos del profesional disponibles
       </div>
     )
   }
@@ -40,7 +40,7 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
   }
 
   const handleDelete = async () => {
-    const confirmed = await confirmAction({ title: "Confirmar", message: `¿Estás seguro de que quieres eliminar a ${estilista.nombre || 'este estilista'}?`, confirmLabel: "Sí, eliminar", variant: "danger" });
+    const confirmed = await confirmAction({ title: "Confirmar", message: `¿Estás seguro de que quieres eliminar a ${estilista.nombre || 'este profesional'}?`, confirmLabel: "Sí, eliminar", variant: "danger" });
     if (confirmed) {
       onDelete?.(estilista)
     }
@@ -62,7 +62,11 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
                 {estilista.nombre || 'Nombre no disponible'}
               </h1>
               <p className="text-gray-600 mt-1">
-                {estilista.rol ? estilista.rol.charAt(0).toUpperCase() + estilista.rol.slice(1) : 'Rol no disponible'}
+                {estilista.rol === 'estilista'
+                  ? 'Profesional'
+                  : estilista.rol
+                    ? estilista.rol.charAt(0).toUpperCase() + estilista.rol.slice(1)
+                    : 'Rol no disponible'}
               </p>
             </div>
           </div>
@@ -236,7 +240,7 @@ export function EstilistaDetail({ estilista, onEdit, onDelete }: EstilistaDetail
               </div>
               <div>
                 <span className="font-medium text-gray-600">Rol:</span>
-                <p className="text-gray-900 capitalize">{estilista.rol || 'No definido'}</p>
+                <p className="text-gray-900 capitalize">{estilista.rol === 'estilista' ? 'Profesional' : estilista.rol || 'No definido'}</p>
               </div>
               {/* 🔥 ELIMINADO: No mostrar ID de franquicia */}
             </div>

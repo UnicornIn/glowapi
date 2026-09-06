@@ -109,7 +109,7 @@ export const estilistaService = {
     });
 
     if (!response.ok) {
-      throw new Error(`Error al obtener estilistas: ${response.statusText}`);
+      throw new Error(`Error al obtener profesionales: ${response.statusText}`);
     }
 
     const data: ApiEstilista[] = await response.json();
@@ -284,7 +284,10 @@ export const estilistaService = {
     try {
       console.log('🔍 Buscando horario para profesional:', profesionalId);
       
-      const response = await fetch(`${API_BASE_URL}scheduling/schedule/profesional/${profesionalId}`, {
+      // La ruta real del backend es /stylist/{profesional_id}, no
+      // /profesional/{...} — con la URL vieja esto SIEMPRE devolvía 404,
+      // sin importar si el profesional tenía horario o no.
+      const response = await fetch(`${API_BASE_URL}scheduling/schedule/stylist/${profesionalId}`, {
         method: 'GET',
         headers: {
           'accept': 'application/json',
@@ -342,11 +345,15 @@ export const estilistaService = {
       sede_id: estilistaData.sede_id,
       especialidades: true,
       activo: estilistaData.activo ?? true,
-      password:
-        typeof estilistaData.password === "string" && estilistaData.password.trim()
-          ? estilistaData.password.trim()
-          : "Temporal123!",
     };
+
+    // Solo enviar `password` si el admin escribió una nueva de verdad — el
+    // backend ahora la aplica de verdad al login real (collection_auth), así
+    // que un valor por defecto acá resetearía la contraseña del profesional
+    // en cualquier edición normal (nombre, teléfono, activo, etc.).
+    if (typeof estilistaData.password === "string" && estilistaData.password.trim()) {
+      requestData.password = estilistaData.password.trim();
+    }
 
     // Solo enviar comision si tiene valor
     if (estilistaData.comision !== undefined) {
@@ -359,6 +366,17 @@ export const estilistaService = {
 
     if (typeof estilistaData.telefono === "string") {
       requestData.telefono = estilistaData.telefono.trim();
+    }
+
+    // comisiones_por_categoria / comisiones_por_servicio llegan ya armadas
+    // desde estilista-form-modal.tsx (buildServiceCommissionPatch), pero este
+    // whitelist las descartaba silenciosamente al reconstruir requestData.
+    if (estilistaData.comisiones_por_categoria !== undefined) {
+      requestData.comisiones_por_categoria = estilistaData.comisiones_por_categoria;
+    }
+
+    if (estilistaData.comisiones_por_servicio !== undefined) {
+      requestData.comisiones_por_servicio = estilistaData.comisiones_por_servicio;
     }
 
     console.log('📤 Actualizando estilista:', requestData);
@@ -377,7 +395,7 @@ export const estilistaService = {
       const errorData = await response.json().catch(() => null);
       throw new Error(
         formatApiErrorDetail(errorData?.detail) ||
-          `Error al actualizar estilista: ${response.statusText}`,
+          `Error al actualizar profesional: ${response.statusText}`,
       );
     }
 
@@ -445,7 +463,7 @@ export const estilistaService = {
       const errorData = await response.json().catch(() => null);
       throw new Error(
         formatApiErrorDetail(errorData?.detail) ||
-          `Error al actualizar comisiones del estilista: ${response.statusText}`,
+          `Error al actualizar comisiones del profesional: ${response.statusText}`,
       );
     }
 
@@ -476,7 +494,7 @@ export const estilistaService = {
       const errorData = await response.json().catch(() => null);
       throw new Error(
         formatApiErrorDetail(errorData?.detail) ||
-          `Error al actualizar servicios del estilista: ${response.statusText}`,
+          `Error al actualizar servicios del profesional: ${response.statusText}`,
       );
     }
 
@@ -494,7 +512,7 @@ export const estilistaService = {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);
-      throw new Error(errorData?.detail || `Error al eliminar estilista: ${response.statusText}`);
+      throw new Error(errorData?.detail || `Error al eliminar profesional: ${response.statusText}`);
     }
   },
 
@@ -508,7 +526,7 @@ export const estilistaService = {
     });
 
     if (!response.ok) {
-      throw new Error(`Error al obtener estilista: ${response.statusText}`);
+      throw new Error(`Error al obtener profesional: ${response.statusText}`);
     }
 
     const data: ApiEstilista = await response.json();

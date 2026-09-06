@@ -89,6 +89,10 @@ type StylistsTeamWorkspaceProps = {
     createEstilista: (token: string, payload: CreateEstilistaData) => Promise<Estilista>;
     createHorario?: (token: string, horario: LegacyScheduleData) => Promise<unknown>;
     updateHorario?: (token: string, horarioId: string, horario: LegacyScheduleData) => Promise<unknown>;
+    getHorarioByProfesional?: (
+      token: string,
+      profesionalId: string,
+    ) => Promise<{ _id: string; disponibilidad: LegacyScheduleData["disponibilidad"] } | null>;
     updateEstilista: (
       token: string,
       profesionalId: string,
@@ -132,6 +136,55 @@ type EditorState = {
   serviceIds: string[];
   serviceCommissions: ServiceCommissionEntry[];
   productCommission: string;
+  // Servicios que este profesional NO atiende — independiente de las
+  // comisiones especiales: por defecto un profesional puede agendar
+  // cualquier servicio del catálogo, y acá se marcan las excepciones.
+  serviciosNoPresta: string[];
+  // Horario semanal. `null` = todavía no se cargó (se carga perezosamente
+  // al abrir la pestaña "Horario" en modo edición) — mientras sea `null`,
+  // handleSave no debe tocar el horario del profesional para nada.
+  horarioId: string | null;
+  disponibilidad: DiaDisponibleDraft[] | null;
+};
+
+type DiaDisponibleDraft = {
+  dia_semana: number;
+  activo: boolean;
+  hora_inicio: string;
+  hora_fin: string;
+};
+
+const DIAS_SEMANA: Array<{ value: number; label: string }> = [
+  { value: 1, label: "Lunes" },
+  { value: 2, label: "Martes" },
+  { value: 3, label: "Miércoles" },
+  { value: 4, label: "Jueves" },
+  { value: 5, label: "Viernes" },
+  { value: 6, label: "Sábado" },
+  { value: 7, label: "Domingo" },
+];
+
+const buildDefaultDisponibilidad = (): DiaDisponibleDraft[] =>
+  DIAS_SEMANA.map((dia) => ({
+    dia_semana: dia.value,
+    activo: false,
+    hora_inicio: "09:00",
+    hora_fin: "18:00",
+  }));
+
+const mergeDisponibilidad = (
+  existente: LegacyScheduleData["disponibilidad"],
+): DiaDisponibleDraft[] => {
+  const base = buildDefaultDisponibilidad();
+  existente.forEach((dia) => {
+    const fila = base.find((b) => b.dia_semana === dia.dia_semana);
+    if (fila) {
+      fila.activo = Boolean(dia.activo);
+      fila.hora_inicio = dia.hora_inicio || fila.hora_inicio;
+      fila.hora_fin = dia.hora_fin || fila.hora_fin;
+    }
+  });
+  return base;
 };
 
 type LegacyScheduleData = {
@@ -160,7 +213,7 @@ type LegacyCreateModalProps = {
 };
 
 const DASHBOARD_HEADERS: Array<{ key: keyof DashboardRowWithProducts; lines: string[] }> = [
-  { key: "nombre", lines: ["Estilistas"] },
+  { key: "nombre", lines: ["Profesionales"] },
   { key: "citas", lines: ["# de Citas"] },
   { key: "cantidadProductos", lines: ["Cantidad de", "Productos"] },
   { key: "totalVentaServicios", lines: ["Total Venta", "Servicios"] },
@@ -174,7 +227,7 @@ const DASHBOARD_HEADERS: Array<{ key: keyof DashboardRowWithProducts; lines: str
 const ROLE_LABELS: Record<string, string> = {
   admin_sede: "Admin sede",
   recepcionista: "Recepcionista",
-  estilista: "Estilista",
+  estilista: "Profesional",
   call_center: "Call center",
   super_admin: "Super admin",
   superadmin: "Super admin",
@@ -770,7 +823,7 @@ function MonthlyProjectionSection({
         <div>
           <h2 className="text-xl font-semibold text-gray-900">Proyección del mes</h2>
           <p className="text-sm text-gray-500">
-            Resumen de ingresos y proyección mensual por estilista.
+            Resumen de ingresos y proyección mensual por profesional.
           </p>
           <p className="text-xs text-gray-500">Período: {periodLabel || "Mes en curso"}</p>
         </div>
@@ -828,7 +881,7 @@ function MonthlyProjectionSection({
               <thead className={TABLE_HEAD_CLASS}>
                 <tr>
                   <th className={TABLE_HEAD_CELL_CLASS}>
-                    Estilista
+                    Profesional
                   </th>
                   <th className={TABLE_HEAD_CELL_CLASS}>
                     <HeaderLabel lines={["# Citas", "del mes"]} />
@@ -905,13 +958,17 @@ export function StylistsTeamWorkspace({
   const [isMetricsLoading, setIsMetricsLoading] = useState(false);
   const [isPerformanceLoading, setIsPerformanceLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingHorario, setIsLoadingHorario] = useState(false);
+  const [horarioLoadError, setHorarioLoadError] = useState<string | null>(null);
+  const horarioLoadedForRef = useRef<string | null>(null);
+  const horarioInitialSnapshotRef = useRef<string | null>(null);
   const [isLegacyCreateOpen, setIsLegacyCreateOpen] = useState(false);
   const [isLegacyCreateSaving, setIsLegacyCreateSaving] = useState(false);
   const [legacyEditStylist, setLegacyEditStylist] = useState<Estilista | null>(null);
   const [periodoActivo, setPeriodoActivo] = useState<PeriodoId>("30dias");
   const [rangoAplicado, setRangoAplicado] = useState<{ from: Date; to: Date } | undefined>(undefined);
   const [panelEstilistaId, setPanelEstilistaId] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<"datos" | "sedes" | "servicios" | "productos">("datos");
+  const [settingsTab, setSettingsTab] = useState<"datos" | "sedes" | "servicios" | "productos" | "horario">("datos");
   const [settingsSearch, setSettingsSearch] = useState("");
   const [settingsFilter, setSettingsFilter] = useState<"todos" | "activos" | "inactivos">("todos");
   const [settingsOpenCategories, setSettingsOpenCategories] = useState<Set<string>>(new Set());
@@ -1239,6 +1296,12 @@ export function StylistsTeamWorkspace({
 
   const initializeEditorState = useCallback(
     (stylist: Estilista | null, mode: "create" | "edit" = "edit") => {
+      // Limpiar cualquier error de una acción anterior (ej. "ya existe email"
+      // de un intento de creación previo) — sin esto quedaba pegado en pantalla
+      // indefinidamente al abrir otro profesional o al crear uno nuevo, porque
+      // `bootError` es un estado único que se comparte entre carga inicial,
+      // crear, editar y eliminar, y nunca se limpiaba al cambiar de acción.
+      setBootError(null);
       const targetSedeId =
         String(stylist?.sede_id ?? "").trim() ||
         String(primarySelectedSedeId ?? "").trim() ||
@@ -1263,6 +1326,9 @@ export function StylistsTeamWorkspace({
           serviceIds: [],
           serviceCommissions: [],
           productCommission: "",
+          serviciosNoPresta: [],
+          horarioId: null,
+          disponibilidad: buildDefaultDisponibilidad(),
         });
         return;
       }
@@ -1305,10 +1371,58 @@ export function StylistsTeamWorkspace({
           stylist.comision_productos !== null && stylist.comision_productos !== undefined
             ? String(stylist.comision_productos)
             : "",
+        serviciosNoPresta: [...(stylist.servicios_no_presta || [])],
+        horarioId: null,
+        disponibilidad: null,
       });
+      horarioInitialSnapshotRef.current = null;
+      horarioLoadedForRef.current = null;
     },
     [primarySelectedSedeId, resolveServiceIdsAndCommissions, selectedSedeId, services, systemUsers],
   );
+
+  // Carga perezosa del horario: solo se pide al backend cuando el admin
+  // abre la pestaña "Horario" de un profesional existente — evita una
+  // petición extra en cada apertura del panel para quien nunca la usa.
+  useEffect(() => {
+    if (settingsTab !== "horario") return;
+    if (!token || !editorState || editorState.mode !== "edit" || !selectedStylist) return;
+    if (editorState.disponibilidad !== null) return;
+    if (horarioLoadedForRef.current === selectedStylist.profesional_id) return;
+
+    if (typeof stylistApi.getHorarioByProfesional !== "function") {
+      const defaults = buildDefaultDisponibilidad();
+      horarioLoadedForRef.current = selectedStylist.profesional_id;
+      horarioInitialSnapshotRef.current = JSON.stringify(defaults);
+      setEditorState((prev) => (prev ? { ...prev, horarioId: null, disponibilidad: defaults } : prev));
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setIsLoadingHorario(true);
+      setHorarioLoadError(null);
+      try {
+        const resultado = await stylistApi.getHorarioByProfesional!(token, selectedStylist.profesional_id);
+        if (cancelled) return;
+        const disponibilidad = mergeDisponibilidad(resultado?.disponibilidad ?? []);
+        horarioLoadedForRef.current = selectedStylist.profesional_id;
+        horarioInitialSnapshotRef.current = JSON.stringify(disponibilidad);
+        setEditorState((prev) =>
+          prev ? { ...prev, horarioId: resultado?._id ?? null, disponibilidad } : prev,
+        );
+      } catch (error) {
+        console.error("Error cargando horario del profesional:", error);
+        if (!cancelled) setHorarioLoadError("No se pudo cargar el horario de este profesional.");
+      } finally {
+        if (!cancelled) setIsLoadingHorario(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsTab, token, editorState, selectedStylist, stylistApi]);
 
   const loadBaseData = useCallback(async () => {
     if (!token) {
@@ -1623,12 +1737,20 @@ export function StylistsTeamWorkspace({
         )
         .flatMap((result) => result.value);
 
-      if (successfulInvoices.length > 0 || invoiceResults.length === 0) {
-        setInvoices(successfulInvoices);
-      } else {
+      // ⭐ FIX: antes esto confundía "0 resultados" (cliente nuevo sin ventas
+      // todavía, todo salió bien) con "la petición falló" — el chequeo era
+      // `successfulInvoices.length > 0`, que es falso en AMBOS casos si no
+      // hay ventas. El error real solo existe si TODAS las promesas fueron
+      // rechazadas (rejected) — si al menos una respondió con éxito (aunque
+      // sea con un array vacío), no hay nada que alarmar.
+      const allInvoicesFailed =
+        invoiceResults.length > 0 && invoiceResults.every((result) => result.status === "rejected");
+      if (allInvoicesFailed) {
         console.error("Error cargando ventas del equipo:", invoiceResults);
         setInvoices([]);
         setMetricsError("No se pudieron cargar las ventas del equipo para el rango seleccionado.");
+      } else {
+        setInvoices(successfulInvoices);
       }
 
       const successfulAppointments = appointmentResults
@@ -1638,14 +1760,18 @@ export function StylistsTeamWorkspace({
         )
         .flatMap((result) => result.value);
 
-      if (successfulAppointments.length > 0 || appointmentResults.length === 0) {
-        setAppointments(successfulAppointments);
-      } else {
+      // Mismo fix que arriba: solo es un error real si TODAS las sedes
+      // fallaron, no simplemente porque todavía no hay citas registradas.
+      const allAppointmentsFailed =
+        appointmentResults.length > 0 && appointmentResults.every((result) => result.status === "rejected");
+      if (allAppointmentsFailed) {
         console.error("Error cargando citas del equipo:", appointmentResults);
         setAppointments([]);
         setMetricsWarning(
           "No se pudieron calcular las citas y la ocupación para este rango. Las ventas y comisiones siguen disponibles.",
         );
+      } else {
+        setAppointments(successfulAppointments);
       }
 
       if (schedulesResult[0]?.status === "fulfilled") {
@@ -1712,6 +1838,22 @@ export function StylistsTeamWorkspace({
 
   const updateEditor = <K extends keyof EditorState>(key: K, value: EditorState[K]) => {
     setEditorState((current) => (current ? { ...current, [key]: value } : current));
+  };
+
+  const updateHorarioDia = <K extends keyof DiaDisponibleDraft>(
+    diaSemana: number,
+    field: K,
+    value: DiaDisponibleDraft[K],
+  ) => {
+    setEditorState((current) => {
+      if (!current || !current.disponibilidad) return current;
+      return {
+        ...current,
+        disponibilidad: current.disponibilidad.map((dia) =>
+          dia.dia_semana === diaSemana ? { ...dia, [field]: value } : dia,
+        ),
+      };
+    });
   };
 
   const getNormalizedCategoryForService = (serviceId: string): string =>
@@ -1809,6 +1951,7 @@ export function StylistsTeamWorkspace({
 
     try {
       setIsSaving(true);
+      setBootError(null);
       const commission = parseCommissionValue(editorState.comision);
       const productCommission = parseCommissionValue(editorState.productCommission);
 
@@ -1831,12 +1974,8 @@ export function StylistsTeamWorkspace({
         };
 
         const created = await stylistApi.createEstilista(token, payload);
-        if (typeof stylistApi.updateServicios === "function") {
-          const selectedIds = new Set(editorState.serviceIds);
-          const serviciosNoPresta = services
-            .map((service) => service.id)
-            .filter((serviceId) => !selectedIds.has(serviceId));
-          await stylistApi.updateServicios(token, created.profesional_id, serviciosNoPresta);
+        if (typeof stylistApi.updateServicios === "function" && editorState.serviciosNoPresta.length > 0) {
+          await stylistApi.updateServicios(token, created.profesional_id, editorState.serviciosNoPresta);
         }
         if (
           typeof stylistApi.updateServiceCommissions === "function" &&
@@ -1849,6 +1988,22 @@ export function StylistsTeamWorkspace({
           );
           await stylistApi.updateServiceCommissions(token, created.profesional_id, categoryPayload);
         }
+        if (
+          typeof stylistApi.createHorario === "function" &&
+          editorState.disponibilidad &&
+          editorState.disponibilidad.some((dia) => dia.activo)
+        ) {
+          await stylistApi.createHorario(token, {
+            profesional_id: created.profesional_id,
+            sede_id: targetSedeId,
+            disponibilidad: editorState.disponibilidad.map(({ dia_semana, hora_inicio, hora_fin, activo }) => ({
+              dia_semana,
+              hora_inicio,
+              hora_fin,
+              activo,
+            })),
+          });
+        }
         await reloadStylists();
         setSelectedStylistId(created.profesional_id);
       } else if (selectedStylist) {
@@ -1857,10 +2012,14 @@ export function StylistsTeamWorkspace({
           targetSedeId,
         );
         const nextServiceIds = editorState.serviceIds.filter(Boolean);
-        const normalizedInitialServiceIds = [...new Set(initialServiceIds)].sort();
-        const normalizedNextServiceIds = [...new Set(nextServiceIds)].sort();
-        const hasServiceSelectionChanges =
-          JSON.stringify(normalizedInitialServiceIds) !== JSON.stringify(normalizedNextServiceIds);
+
+        // "No atiende" es independiente de las comisiones especiales — se
+        // compara contra el `servicios_no_presta` real del profesional, no
+        // contra qué servicios tienen comisión agregada.
+        const normalizedInitialNoPresta = [...new Set(selectedStylist.servicios_no_presta || [])].sort();
+        const normalizedNextNoPresta = [...new Set(editorState.serviciosNoPresta)].sort();
+        const hasNoPrestaChanges =
+          JSON.stringify(normalizedInitialNoPresta) !== JSON.stringify(normalizedNextNoPresta);
 
         const initialCommission = selectedStylist.comision ?? null;
         const initialProductCommission = selectedStylist.comision_productos ?? null;
@@ -1891,7 +2050,8 @@ export function StylistsTeamWorkspace({
           JSON.stringify(Object.entries(initialCategoryPayload).sort(([a], [b]) => a.localeCompare(b))) !==
           JSON.stringify(Object.entries(currentCategoryPayload).sort(([a], [b]) => a.localeCompare(b)));
 
-        if (hasBasicChanges) {
+        const nuevaPassword = editorState.password.trim();
+        if (hasBasicChanges || nuevaPassword) {
           const payload: Partial<Estilista> & Record<string, unknown> = {
             nombre: editorState.nombre.trim(),
             email: editorState.email.trim(),
@@ -1900,17 +2060,18 @@ export function StylistsTeamWorkspace({
             activo: editorState.activo,
             comision: commission,
             comision_productos: productCommission,
-            password: editorState.password.trim() || DEFAULT_STYLIST_PASSWORD,
           };
+          // Solo se manda `password` si el admin escribió una nueva — dejarlo
+          // vacío no debe resetear la contraseña real del profesional (ver
+          // fix del backend en update_professional, que ahora sí la aplica).
+          if (nuevaPassword) {
+            payload.password = nuevaPassword;
+          }
 
           await stylistApi.updateEstilista(token, selectedStylist.profesional_id, payload);
         }
-        if (hasServiceSelectionChanges && typeof stylistApi.updateServicios === "function") {
-          const selectedIds = new Set(nextServiceIds);
-          const serviciosNoPresta = services
-            .map((service) => service.id)
-            .filter((serviceId) => !selectedIds.has(serviceId));
-          await stylistApi.updateServicios(token, selectedStylist.profesional_id, serviciosNoPresta);
+        if (hasNoPrestaChanges && typeof stylistApi.updateServicios === "function") {
+          await stylistApi.updateServicios(token, selectedStylist.profesional_id, editorState.serviciosNoPresta);
         }
         if (hasServiceCommissionChanges && typeof stylistApi.updateServiceCommissions === "function") {
           await stylistApi.updateServiceCommissions(
@@ -1919,12 +2080,38 @@ export function StylistsTeamWorkspace({
             currentCategoryPayload,
           );
         }
+        if (editorState.disponibilidad) {
+          const disponibilidadPayload = editorState.disponibilidad.map(
+            ({ dia_semana, hora_inicio, hora_fin, activo }) => ({ dia_semana, hora_inicio, hora_fin, activo }),
+          );
+          const hasHorarioChanges =
+            horarioInitialSnapshotRef.current !== null &&
+            horarioInitialSnapshotRef.current !== JSON.stringify(editorState.disponibilidad);
+
+          if (editorState.horarioId && hasHorarioChanges && typeof stylistApi.updateHorario === "function") {
+            await stylistApi.updateHorario(token, editorState.horarioId, {
+              profesional_id: selectedStylist.profesional_id,
+              sede_id: targetSedeId,
+              disponibilidad: disponibilidadPayload,
+            });
+          } else if (
+            !editorState.horarioId &&
+            editorState.disponibilidad.some((dia) => dia.activo) &&
+            typeof stylistApi.createHorario === "function"
+          ) {
+            await stylistApi.createHorario(token, {
+              profesional_id: selectedStylist.profesional_id,
+              sede_id: targetSedeId,
+              disponibilidad: disponibilidadPayload,
+            });
+          }
+        }
         await reloadStylists();
       }
     } catch (error) {
       console.error("Error guardando estilista:", error);
       setBootError(
-        error instanceof Error ? error.message : "No se pudo guardar la configuración del estilista.",
+        error instanceof Error ? error.message : "No se pudo guardar la configuración del profesional.",
       );
     } finally {
       setIsSaving(false);
@@ -1938,12 +2125,13 @@ export function StylistsTeamWorkspace({
 
     try {
       setIsSaving(true);
+      setBootError(null);
       await stylistApi.deleteEstilista(token, selectedStylist.profesional_id);
       await reloadStylists();
     } catch (error) {
       console.error("Error eliminando estilista:", error);
       setBootError(
-        error instanceof Error ? error.message : "No se pudo eliminar el estilista seleccionado.",
+        error instanceof Error ? error.message : "No se pudo eliminar el profesional seleccionado.",
       );
     } finally {
       setIsSaving(false);
@@ -1960,7 +2148,7 @@ export function StylistsTeamWorkspace({
       payload.sede_id ?? legacyEditStylist?.sede_id ?? primarySelectedSedeId ?? "",
     ).trim();
     if (!targetSedeId) {
-      setBootError("Debes seleccionar una sede para crear el estilista.");
+      setBootError("Debes seleccionar una sede para crear el profesional.");
       return;
     }
 
@@ -2044,7 +2232,7 @@ export function StylistsTeamWorkspace({
       setBootError(
         error instanceof Error
           ? error.message
-          : "No se pudo crear el estilista con el formulario anterior.",
+          : "No se pudo crear el profesional con el formulario anterior.",
       );
     } finally {
       setIsLegacyCreateSaving(false);
@@ -2093,6 +2281,32 @@ export function StylistsTeamWorkspace({
     return grouped;
   }, [editorState, serviceOptionsById]);
 
+  // Catálogo completo agrupado por categoría — para el checklist de "no
+  // atiende" (a diferencia de getServiceCategoriesGrouped, que solo agrupa
+  // los servicios que ya tienen comisión especial agregada).
+  const allServicesGroupedByCategory = useMemo(() => {
+    const grouped = new Map<string, { serviceId: string; nombre: string }[]>();
+    for (const svc of services) {
+      const cat = svc.categoria || "Sin categoría";
+      if (!grouped.has(cat)) grouped.set(cat, []);
+      grouped.get(cat)!.push({ serviceId: svc.id, nombre: svc.nombre });
+    }
+    return grouped;
+  }, [services]);
+
+  const toggleServicioNoPresta = useCallback((serviceId: string) => {
+    setEditorState((prev) => {
+      if (!prev) return prev;
+      const yaNoLoPresta = prev.serviciosNoPresta.includes(serviceId);
+      return {
+        ...prev,
+        serviciosNoPresta: yaNoLoPresta
+          ? prev.serviciosNoPresta.filter((id) => id !== serviceId)
+          : [...prev.serviciosNoPresta, serviceId],
+      };
+    });
+  }, []);
+
   const handleOpenCreate = () => {
     if (LegacyCreateModal) {
       setIsLegacyCreateOpen(true);
@@ -2123,7 +2337,7 @@ export function StylistsTeamWorkspace({
         <div className={viewMode === "settings" ? "flex flex-col h-full overflow-hidden" : "p-4 md:p-8"}>
           {viewMode === "dashboard" && (
             <PageHeader
-              title="Estilistas"
+              title="Profesionales"
               actions={
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
@@ -2133,7 +2347,7 @@ export function StylistsTeamWorkspace({
                     onClick={() => { setSettingsPanelClosed(true); setSelectedStylistId(""); setEditorState(null); setViewMode("settings"); }}
                   >
                     <Settings2 className="mr-2 h-4 w-4" />
-                    Configuración de Estilistas
+                    Configuración de Profesionales
                   </Button>
                 </div>
               }
@@ -2198,9 +2412,9 @@ export function StylistsTeamWorkspace({
               <section className={`${PANEL_CLASS} p-6`}>
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-xl font-semibold text-gray-900">Estilistas</h2>
+                    <h2 className="text-xl font-semibold text-gray-900">Profesionales</h2>
                     <p className="text-sm text-gray-500">
-                      Métricas por estilista para la sede y el rango seleccionados.
+                      Métricas por profesional para la sede y el rango seleccionados.
                     </p>
                   </div>
                   {isMetricsLoading ? (
@@ -2213,8 +2427,8 @@ export function StylistsTeamWorkspace({
 
                 {dashboardRows.length === 0 ? (
                   <EmptyPanel
-                    title="No hay estilistas en esta sede"
-                    description="Selecciona otra sede o agrega estilistas al equipo para ver el tablero."
+                    title="No hay profesionales en esta sede"
+                    description="Selecciona otra sede o agrega profesionales al equipo para ver el tablero."
                   />
                 ) : (
                   <div className={TABLE_WRAPPER_CLASS}>
@@ -2344,7 +2558,7 @@ export function StylistsTeamWorkspace({
                 {/* Header inside left panel */}
                 <div className="flex items-start justify-between gap-3 mb-4">
                   <h1 className="text-[28px] font-semibold tracking-tight text-slate-900">
-                    Configuración de Estilistas
+                    Configuración de Profesionales
                   </h1>
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <Button
@@ -2363,7 +2577,7 @@ export function StylistsTeamWorkspace({
                       onClick={handleOpenCreate}
                     >
                       <Plus className="mr-2 h-4 w-4" />
-                      Nuevo estilista
+                      Nuevo profesional
                     </Button>
                   </div>
                 </div>
@@ -2400,7 +2614,7 @@ export function StylistsTeamWorkspace({
                     <input
                       className="gle-search-input text-[13px]"
                       type="text"
-                      placeholder="Buscar estilista..."
+                      placeholder="Buscar profesional..."
                       value={settingsSearch}
                       onChange={(e) => setSettingsSearch(e.target.value)}
                     />
@@ -2420,7 +2634,7 @@ export function StylistsTeamWorkspace({
                 {/* Table */}
                 <div className="gle-table-card">
                   <div className="gle-table-head gle-table-head-5col">
-                    <div className="gle-th text-[11px]">Estilista</div>
+                    <div className="gle-th text-[11px]">Profesional</div>
                     <div className="gle-th text-[11px]">Sede</div>
                     <div className="gle-th text-[11px]">Servicios</div>
                     <div className="gle-th text-[11px]">Estado</div>
@@ -2430,7 +2644,7 @@ export function StylistsTeamWorkspace({
                   {filteredSettingsStylists.length === 0 ? (
                     <div className="px-10 py-10 text-center">
                       <p className="text-[13px]" style={{ color: "var(--gle-text-tertiary)" }}>
-                        No hay estilistas para mostrar.
+                        No hay profesionales para mostrar.
                       </p>
                     </div>
                   ) : (
@@ -2521,7 +2735,7 @@ export function StylistsTeamWorkspace({
                           </div>
                           <div>
                             <div className="gle-panel-title text-[15px]">
-                              {editorState.nombre || "Nuevo estilista"}
+                              {editorState.nombre || "Nuevo profesional"}
                             </div>
                             <div className="text-[12px]" style={{ color: "var(--gle-text-tertiary)" }}>
                               {editorState.mode === "edit"
@@ -2545,14 +2759,22 @@ export function StylistsTeamWorkspace({
 
                       {/* Tabs */}
                       <div className="gle-panel-tabs">
-                        {(["datos", "sedes", "servicios", "productos"] as const).map((tab) => (
+                        {(["datos", "sedes", "servicios", "productos", "horario"] as const).map((tab) => (
                           <button
                             key={tab}
                             type="button"
                             className={`gle-ptab ${settingsTab === tab ? "active" : ""}`}
                             onClick={() => setSettingsTab(tab)}
                           >
-                            {tab === "datos" ? "Datos" : tab === "sedes" ? "Sede" : tab === "servicios" ? "Comisiones servicios" : "Comisiones productos"}
+                            {tab === "datos"
+                              ? "Datos"
+                              : tab === "sedes"
+                                ? "Sede"
+                                : tab === "servicios"
+                                  ? "Comisiones servicios"
+                                  : tab === "productos"
+                                    ? "Comisiones productos"
+                                    : "Horario"}
                           </button>
                         ))}
                       </div>
@@ -2659,11 +2881,11 @@ export function StylistsTeamWorkspace({
                                 </div>
                               ) : (
                                 <div className="gle-form-group">
-                                  <label className="gle-form-label text-[12px]">Contraseña</label>
+                                  <label className="gle-form-label text-[12px]">Nueva contraseña (opcional)</label>
                                   <input
                                     className="gle-form-input text-[13px]"
                                     type="password"
-                                    placeholder="••••"
+                                    placeholder="Dejar vacío para no cambiarla"
                                     value={editorState.password}
                                     onChange={(e) => updateEditor("password", e.target.value)}
                                   />
@@ -2706,7 +2928,7 @@ export function StylistsTeamWorkspace({
                           </div>
 
                           <div className="gle-hint-box text-[12px]">
-                            La sede seleccionada determina en qué agenda aparece el estilista y qué reportes financieros lo incluyen.
+                            La sede seleccionada determina en qué agenda aparece el profesional y qué reportes financieros lo incluyen.
                           </div>
                         </div>
                       )}
@@ -2714,6 +2936,51 @@ export function StylistsTeamWorkspace({
                       {/* ── TAB: COMISIONES SERVICIOS ── */}
                       {settingsTab === "servicios" && (
                         <div>
+                          {/* Servicios que NO atiende — independiente de las
+                              comisiones: por defecto el profesional puede
+                              agendar cualquier servicio del catálogo, acá se
+                              marcan las excepciones. */}
+                          <div className="mb-[14px]">
+                            <div className="gle-base-comm-label text-[13px]">Servicios que NO atiende</div>
+                            <div className="gle-base-comm-desc text-[11px] mb-[8px]">
+                              Por defecto puede agendar cualquier servicio del catálogo — marca acá las excepciones.
+                            </div>
+                            {Array.from(allServicesGroupedByCategory.entries()).map(([cat, svcs]) => {
+                              const isOpen = settingsOpenCategories.has(cat);
+                              return (
+                                <div key={`no-presta-${cat}`} className="mb-[6px]">
+                                  <div className="gle-cat-header" onClick={() => toggleSettingsCategory(cat)}>
+                                    <div className="gle-cat-header-name text-[12px]">
+                                      {cat}
+                                      <span className="gle-cat-count text-[11px]">{svcs.length} servicio{svcs.length !== 1 ? "s" : ""}</span>
+                                    </div>
+                                    <span className={`gle-cat-expand text-[12px] ${isOpen ? "open" : ""}`}>▾</span>
+                                  </div>
+                                  {isOpen && (
+                                    <div>
+                                      <div className="gle-cat-divider" />
+                                      {svcs.map(({ serviceId, nombre }) => (
+                                        <label
+                                          key={serviceId}
+                                          className="gle-commission-row"
+                                          style={{ cursor: "pointer" }}
+                                        >
+                                          <div className="gle-commission-label text-[13px]">{nombre}</div>
+                                          <input
+                                            type="checkbox"
+                                            checked={editorState.serviciosNoPresta.includes(serviceId)}
+                                            onChange={() => toggleServicioNoPresta(serviceId)}
+                                            className="h-4 w-4 rounded border-gray-300"
+                                          />
+                                        </label>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+
                           {/* Base commission */}
                           <div className="gle-base-commission-box">
                             <div>
@@ -2821,7 +3088,7 @@ export function StylistsTeamWorkspace({
                           <div className="gle-base-commission-box">
                             <div>
                               <div className="gle-base-comm-label text-[13px]">Comisión base por producto</div>
-                              <div className="gle-base-comm-desc text-[11px]">Se aplica a todos los productos que venda este estilista</div>
+                              <div className="gle-base-comm-desc text-[11px]">Se aplica a todos los productos que venda este profesional</div>
                             </div>
                             <div className="flex items-center gap-[6px]">
                               <div className="gle-commission-input-wrap" style={{ width: 64 }}>
@@ -2839,12 +3106,89 @@ export function StylistsTeamWorkspace({
                           </div>
 
                           <div className="gle-hint-box text-[12px]">
-                            Las comisiones por producto aplican cuando el estilista registra una venta de producto en facturación. Puedes definir % diferente por categoría de producto o por proveedor.
+                            Las comisiones por producto aplican cuando el profesional registra una venta de producto en facturación. Puedes definir % diferente por categoría de producto o por proveedor.
                           </div>
 
                           <p className="mt-2 text-[12px]" style={{ color: "var(--gle-text-tertiary)" }}>
                             Opcional. Valor entre 0 y 100. Si se deja vacío se usará la comisión del inventario/sede o la global del producto.
                           </p>
+                        </div>
+                      )}
+
+                      {/* ── TAB: HORARIO ── */}
+                      {settingsTab === "horario" && (
+                        <div>
+                          {isLoadingHorario && (
+                            <div className="text-[12px]" style={{ color: "var(--gle-text-tertiary)" }}>
+                              Cargando horario...
+                            </div>
+                          )}
+
+                          {horarioLoadError && (
+                            <div className="gle-hint-box text-[12px]" style={{ color: "var(--gle-destructive-text)" }}>
+                              {horarioLoadError}
+                            </div>
+                          )}
+
+                          {!isLoadingHorario && editorState.disponibilidad && (
+                            <>
+                              <div className="gle-hint-box text-[12px]">
+                                Marca los días que este profesional atiende y el rango de horas de
+                                cada uno. Los días sin marcar no se ofrecen para agendar citas de
+                                este profesional.
+                              </div>
+
+                              <div className="mt-2 flex flex-col gap-[6px]">
+                                {editorState.disponibilidad.map((dia) => {
+                                  const diaLabel = DIAS_SEMANA.find((d) => d.value === dia.dia_semana)?.label ?? "";
+                                  return (
+                                    <div
+                                      key={dia.dia_semana}
+                                      className="gle-commission-row"
+                                      style={{ display: "flex", alignItems: "center", gap: 10 }}
+                                    >
+                                      <label
+                                        className="flex items-center gap-[6px] text-[13px]"
+                                        style={{ width: 110, color: "var(--gle-text-primary)" }}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={dia.activo}
+                                          onChange={(e) =>
+                                            updateHorarioDia(dia.dia_semana, "activo", e.target.checked)
+                                          }
+                                        />
+                                        {diaLabel}
+                                      </label>
+                                      <input
+                                        className="gle-form-input text-[13px]"
+                                        type="time"
+                                        style={{ width: 120 }}
+                                        value={dia.hora_inicio}
+                                        disabled={!dia.activo}
+                                        onChange={(e) =>
+                                          updateHorarioDia(dia.dia_semana, "hora_inicio", e.target.value)
+                                        }
+                                      />
+                                      <span className="text-[12px]" style={{ color: "var(--gle-text-tertiary)" }}>
+                                        a
+                                      </span>
+                                      <input
+                                        className="gle-form-input text-[13px]"
+                                        type="time"
+                                        style={{ width: 120 }}
+                                        value={dia.hora_fin}
+                                        disabled={!dia.activo}
+                                        onChange={(e) =>
+                                          updateHorarioDia(dia.dia_semana, "hora_fin", e.target.value)
+                                        }
+                                      />
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
