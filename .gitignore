@@ -22,8 +22,11 @@ Frontend/node_modules/
 Frontend/dist/
 Frontend/.env.local
 
-# ── Doc interno de integración (no se sube; se comparte aparte) ──
+# ── Docs internos de contexto de sesión (no se suben; son para uso
+# interno del desarrollo con Claude, no para el repo compartido) ──
 INTEGRACION_FRONTEND_BACKEND.md
+CLAUDE.md
+.claude/
 
 # ── Editor / SO ─────────────────────────────────────────────
 .vscode/

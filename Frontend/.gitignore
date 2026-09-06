@@ -11,6 +11,10 @@ node_modules
 dist
 dist-ssr
 
+# Variables de entorno locales (URLs de tuneles, backends de prueba)
+.env.local
+.env.*.local
+
 
 # Editor directories and files
 .vscode/*
