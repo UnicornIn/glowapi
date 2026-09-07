@@ -19,13 +19,12 @@ export interface Servicio {
   creado_por?: string;
   created_at?: string;
   updated_at?: string;
-  precios_completos?: {
-    USD: number;
-    COP?: number;
-    MXN?: number;
-  };
+  precios_completos?: Record<string, number>;
   sede_id?: string | null; // 🔥 CAMBIO: Permitir string | null | undefined
   codigo_referencia?: string;
+  // Paquetes de sesiones prepagas de este mismo servicio (ej. "5 sesiones
+  // por 750.000") — opciones de precio/cantidad, no un servicio aparte.
+  paquetes_sesiones?: { sesiones: number; precio: number }[];
 }
 
 // 🔥 INTERFAZ PARA DATOS DE SERVICIO DE LA API
@@ -34,11 +33,7 @@ interface ServicioAPI {
   servicio_id?: string;
   nombre: string;
   duracion_minutos: number;
-  precios: {
-    USD: number;
-    COP?: number;
-    MXN?: number;
-  };
+  precios: Record<string, number>;
   comision_estilista?: number;
   categoria?: string;
   requiere_producto?: boolean;
@@ -47,6 +42,7 @@ interface ServicioAPI {
   creado_por?: string;
   created_at?: string;
   updated_at?: string;
+  paquetes_sesiones?: { sesiones: number; precio: number }[];
 }
 
 // 🔥 INTERFAZ PARA SERVICIOS DE EJEMPLO
@@ -92,22 +88,30 @@ function getMonedaSede(): string {
 }
 
 // 🔥 FUNCIÓN AUXILIAR PARA OBTENER PRECIO SEGÚN MONEDA
+// Antes solo reconocía COP/MXN explícitos y caía a USD para cualquier otra
+// moneda (incl. BOB) — si el servicio no tenía precio en USD cargado (como
+// "prueba servicio", solo con BOB), devolvía 0 en vez del precio real.
+// Ahora busca primero la moneda real de la sede en el mapa, sin importar
+// cuál sea, y solo cae a USD / la primera moneda disponible como fallback.
 function obtenerPrecioPorMoneda(
-  precios: { USD: number; COP?: number; MXN?: number }, 
+  precios: Record<string, number>,
   monedaSede: string
 ): { precio: number; moneda: string } {
-  
-  // Verificar monedas en orden de prioridad
-  if (monedaSede === 'COP' && precios.COP !== undefined && precios.COP !== null) {
-    return { precio: precios.COP, moneda: 'COP' };
-  } else if (monedaSede === 'MXN' && precios.MXN !== undefined && precios.MXN !== null) {
-    return { precio: precios.MXN, moneda: 'MXN' };
-  } else if (precios.USD !== undefined && precios.USD !== null) {
+  if (precios[monedaSede] !== undefined && precios[monedaSede] !== null) {
+    return { precio: precios[monedaSede], moneda: monedaSede };
+  }
+
+  if (precios.USD !== undefined && precios.USD !== null) {
     return { precio: precios.USD, moneda: 'USD' };
   }
-  
-  // Si no hay precios disponibles, retornar 0 en USD
-  return { precio: 0, moneda: 'USD' };
+
+  const primeraMoneda = Object.keys(precios)[0];
+  if (primeraMoneda !== undefined) {
+    return { precio: precios[primeraMoneda], moneda: primeraMoneda };
+  }
+
+  // Si de verdad no hay ningún precio cargado, sí es 0.
+  return { precio: 0, moneda: monedaSede };
 }
 
 // 🔥 FUNCIÓN PRINCIPAL: Obtener servicios según la sede
@@ -198,10 +202,11 @@ async function getServiciosNormales(token: string, sedeId?: string, monedaSede: 
         created_at: servicio.created_at,
         updated_at: servicio.updated_at,
         sede_id: servicio.sede_id || sedeId || null,
-        precios_completos: servicio.precios || { USD: precioFinal }
+        precios_completos: servicio.precios || { USD: precioFinal },
+        paquetes_sesiones: servicio.paquetes_sesiones
       };
     });
-    
+
     console.log('✅ Servicios normales procesados:', serviciosProcesados.length);
     
     // Mostrar resumen de precios
@@ -294,10 +299,11 @@ async function getServiciosExclusivosGuayaquil(token: string, sedeId?: string, m
         created_at: servicio.created_at,
         updated_at: servicio.updated_at,
         sede_id: servicio.sede_id || sedeId || null,
-        precios_completos: servicio.precios || { USD: precioFinal }
+        precios_completos: servicio.precios || { USD: precioFinal },
+        paquetes_sesiones: servicio.paquetes_sesiones
       };
     });
-    
+
     // 🔥 VERIFICAR SI FALTAN SERVICIOS
     const nombresApi = serviciosData.map(s => s.nombre.toLowerCase());
     const serviciosFaltantes = TODOS_SERVICIOS_GUAYAQUIL.filter(s => 
@@ -622,7 +628,8 @@ function procesarServicioConMonedaIndividual(servicioData: any): Servicio {
     created_at: servicioData.created_at,
     updated_at: servicioData.updated_at,
     precios_completos: servicioData.precios,
-    sede_id: servicioData.sede_id || null
+    sede_id: servicioData.sede_id || null,
+    paquetes_sesiones: servicioData.paquetes_sesiones
   };
 }
 

@@ -7,9 +7,9 @@
 // fuera del árbol de React (ej. src/lib/pdfGenerator.ts).
 
 export const brand = {
-  appName: import.meta.env.VITE_APP_NAME || "sëns",
-  companyName: import.meta.env.VITE_APP_COMPANY_NAME || "sëns",
-  logoUrl: import.meta.env.VITE_APP_LOGO_URL || "/sense-logo.svg",
+  appName: import.meta.env.VITE_APP_NAME || "NEXA",
+  companyName: import.meta.env.VITE_APP_COMPANY_NAME || "NEXA",
+  logoUrl: import.meta.env.VITE_APP_LOGO_URL || "/nexa-icon.png",
   faviconUrl: import.meta.env.VITE_APP_FAVICON_URL || "/favicon.png",
   footerLegal: "",
   wsUrl: "",

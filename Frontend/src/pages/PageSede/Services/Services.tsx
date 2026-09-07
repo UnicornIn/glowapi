@@ -11,6 +11,7 @@ import { Plus, Loader, AlertCircle } from "lucide-react";
 import { confirmAction } from '../../../components/ui/confirm-dialog';
 import { serviciosService, type ServiceWithCurrency } from "./serviciosService";
 import { useAuth } from "../../../components/Auth/AuthContext";
+import { getStoredCurrency } from "../../../lib/currency";
 
 export default function ServicesPage() {
   const [services, setServices] = useState<ServiceWithCurrency[]>([]);
@@ -27,10 +28,10 @@ export default function ServicesPage() {
 
   const { user, isLoading: authLoading } = useAuth();
 
-  // Determinar moneda basada en el país del usuario
-  const monedaUsuario = user?.pais 
-    ? serviciosService.getMonedaFromPais(user.pais)
-    : 'USD';
+  // Moneda real configurada para la sede (guardada en sesión al login), no un
+  // mapeo país→moneda que no conoce Bolivia y mandaría todo a USD por error
+  // (mismo bug ya encontrado y corregido antes en AppointmentForm.tsx).
+  const monedaUsuario = user?.moneda || getStoredCurrency('USD');
 
   // Cargar servicios desde la API con la moneda del usuario
   const loadServices = async () => {
@@ -93,22 +94,40 @@ export default function ServicesPage() {
       setError(null);
 
       if (selectedService) {
-        // Actualizar servicio existente
+        // El formulario solo maneja un precio (la moneda de esta sede) — se
+        // trae el mapa `precios` actual del servicio y se fusiona la moneda
+        // editada, para no perder otras monedas ya cargadas ni mandar el
+        // campo `precios` vacío (el backend lo exige y da 422 sin él).
+        const actual = await serviciosService.obtenerServicioPorId(user.access_token, selectedService.id);
+        const precios = { ...(actual?.precios || {}), [monedaUsuario]: service.precio };
+
         await serviciosService.updateServicio(
           user.access_token,
           selectedService.id,
           {
             nombre: service.nombre,
             duracion_minutos: service.duracion,
+            precios,
             categoria: service.categoria,
-            comision_estilista: service.comision_porcentaje,
             activo: service.activo,
-            requiere_producto: service.requiere_producto || false
+            requiere_producto: service.requiere_producto || false,
+            paquetes_sesiones: service.paquetes_sesiones
           }
         );
       } else {
-        console.warn('Creación de servicios requiere formulario con precios por moneda');
-        throw new Error('La creación de servicios requiere definir precios para todas las monedas');
+        // Servicio nuevo: no hay un registro previo del que traer otras
+        // monedas ya cargadas, así que el mapa `precios` se arma directo con
+        // la moneda de esta sede (antes esta rama tiraba un error y no
+        // dejaba crear servicios desde Sede en absoluto).
+        await serviciosService.createServicio(user.access_token, {
+          nombre: service.nombre,
+          duracion_minutos: service.duracion,
+          precios: { [monedaUsuario]: service.precio },
+          categoria: service.categoria,
+          activo: service.activo,
+          requiere_producto: service.requiere_producto || false,
+          paquetes_sesiones: service.paquetes_sesiones
+        });
       }
 
       // Recargar la lista
@@ -130,7 +149,12 @@ export default function ServicesPage() {
       return;
     }
 
-    const confirmed = await confirmAction({ title: "Confirmar", message: "¿Estás seguro de que quieres eliminar este servicio?", confirmLabel: "Sí, eliminar", variant: "danger" });
+    const confirmed = await confirmAction({
+      title: "Eliminar servicio",
+      message: "Esto borra el servicio por completo, no se puede deshacer. Si tiene citas o paquetes de sesiones asociados, no se podrá eliminar — en ese caso, desmarca \"Activo\" en Editar para dejar de ofrecerlo sin perder el historial.",
+      confirmLabel: "Sí, eliminar",
+      variant: "danger"
+    });
     if (!confirmed) {
       return;
     }

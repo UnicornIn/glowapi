@@ -6,10 +6,11 @@ import {
 import { useAuth } from '../../components/Auth/AuthContext';
 import { getEstilistas, getEstilistaCompleto, Estilista } from '../../components/Professionales/estilistasApi';
 import { getServicios, Servicio } from '../../components/Quotes/serviciosApi';
-import { Cliente, getHistorialCliente } from './clientsService';
+import { Cliente, getHistorialCliente, getPaquetesCliente, PaqueteCliente } from './clientsService';
 import { ClientSearch } from '../../pages/PageSuperAdmin/Appoinment/Clients/ClientSearch';
 import { crearCita } from './citasApi';
 import { PAYMENT_METHOD_OPTIONS } from '../../lib/payment-methods';
+import { getStoredCurrency } from '../../lib/currency';
 
 interface EstilistaCompleto extends Estilista {
   servicios_no_presta: string[];
@@ -23,6 +24,15 @@ interface SelectedService {
   precio_base: number;
   precio_personalizado: number | null;
   precio_final: number;
+  // Si el cliente tiene un paquete de sesiones ya comprado que cubre este
+  // servicio, y eligió usarlo, aquí queda el id del paquete a canjear — la
+  // sesión no se vuelve a cobrar (ver backend: routes_quotes.py/crear_cita).
+  paquete_id?: string | null;
+  // Si eligió comprar un paquete nuevo de este servicio (ej. "5 sesiones por
+  // 750.000"), aquí queda cuántas sesiones — se cobra el paquete completo y
+  // el backend deja el saldo de las sesiones restantes al facturar.
+  // Mutuamente excluyente con `paquete_id`.
+  comprar_paquete_sesiones?: number | null;
 }
 
 interface AppointmentSchedulerProps {
@@ -315,6 +325,7 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
   const [selectedClient, setSelectedClient] = useState<Cliente | null>(null);
   const [clientHistorial, setClientHistorial] = useState<any[]>([]);
   const [loadingHistorial, setLoadingHistorial] = useState(false);
+  const [paquetesCliente, setPaquetesCliente] = useState<PaqueteCliente[]>([]);
 
   // Step 2 — services / pro / time
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
@@ -341,13 +352,13 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Currency
-  const currency = useMemo(() => {
-    const p = user?.pais;
-    if (p === 'Colombia') return 'COP';
-    if (p === 'México' || p === 'Mexico') return 'MXN';
-    return 'USD';
-  }, [user?.pais]);
+  // Currency — usa la moneda real configurada para la sede (guardada en sesión al
+  // login), no un mapeo país→moneda hardcodeado que solo conocía Colombia/México
+  // y mandaba todo lo demás (incl. Bolivia) a USD por error.
+  const currency = useMemo(
+    () => user?.moneda || getStoredCurrency('USD'),
+    [user?.moneda],
+  );
 
   // Init date / time from props
   useEffect(() => {
@@ -421,6 +432,15 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
       .finally(() => setLoadingHistorial(false));
   }, [selectedClient, user?.access_token]);
 
+  // Fetch paquetes de sesiones activos del cliente — para ofrecer "usar
+  // sesión del paquete" en vez de cobrar de nuevo un servicio ya prepagado.
+  useEffect(() => {
+    if (!selectedClient || !user?.access_token) { setPaquetesCliente([]); return; }
+    const id = selectedClient.cliente_id || (selectedClient as any)._id;
+    if (!id) return;
+    getPaquetesCliente(user.access_token, id).then(setPaquetesCliente);
+  }, [selectedClient, user?.access_token]);
+
   // Services filtered by stylist + search
   const serviciosFiltrados = useMemo(() => {
     if (!servicios.length) return [];
@@ -482,9 +502,54 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
     setServiciosSeleccionados(prev => prev.map(s => {
       if (s.servicio_id !== id) return s;
       const p = val ? parseFloat(val) : null;
-      return { ...s, precio_personalizado: p, precio_final: p ?? s.precio_base };
+      // Si esta línea está comprando un paquete de sesiones, el precio "de
+      // base" para volver atrás (input vacío) es el de esa opción de
+      // paquete, no el precio normal del servicio.
+      let fallback = s.precio_base;
+      if (s.comprar_paquete_sesiones) {
+        const servicioCompleto = servicios.find(sv => (sv.servicio_id || sv._id) === id);
+        const tier = servicioCompleto?.paquetes_sesiones?.find(t => t.sesiones === s.comprar_paquete_sesiones);
+        fallback = tier?.precio ?? s.precio_base;
+      }
+      return { ...s, precio_personalizado: p, precio_final: p ?? fallback };
     }));
-  }, []);
+  }, [servicios]);
+
+  // Paquete de sesiones activo (con saldo) que cubre este servicio, si existe.
+  const findPaqueteParaServicio = useCallback(
+    (servicioId: string) => paquetesCliente.find(
+      p => p.servicio_id === servicioId && p.activo && p.sesiones_restantes > 0
+    ),
+    [paquetesCliente]
+  );
+
+  // Selector unificado de "cómo se cobra esta línea": precio normal, canjear
+  // una sesión de un paquete ya comprado, o comprar un paquete nuevo (una de
+  // las opciones configuradas en el propio servicio). El valor codifica la
+  // elección: "normal" | "canjear" | "comprar:<sesiones>".
+  const setModoCobroServicio = useCallback((servicioId: string, modo: string) => {
+    setServiciosSeleccionados(prev => prev.map(s => {
+      if (s.servicio_id !== servicioId) return s;
+      if (modo === "canjear") {
+        const paquete = findPaqueteParaServicio(servicioId);
+        if (!paquete) return s;
+        // Ya pagado al comprar el paquete — esta sesión no se cobra de nuevo.
+        return { ...s, paquete_id: paquete.paquete_id, comprar_paquete_sesiones: null, precio_personalizado: null, precio_final: 0 };
+      }
+      if (modo.startsWith("comprar:")) {
+        const sesiones = parseInt(modo.split(":")[1], 10);
+        const servicioCompleto = servicios.find(sv => (sv.servicio_id || sv._id) === servicioId);
+        const tier = servicioCompleto?.paquetes_sesiones?.find(p => p.sesiones === sesiones);
+        if (!tier) return s;
+        // Se cobra el paquete completo — esta primera sesión ya queda incluida.
+        // Cualquier precio personalizado que hubiera quedado de un modo
+        // anterior no aplica a esta base de precio nueva.
+        return { ...s, paquete_id: null, comprar_paquete_sesiones: sesiones, precio_personalizado: null, precio_final: tier.precio };
+      }
+      // "normal": vuelve al precio de siempre (o el personalizado si había uno).
+      return { ...s, paquete_id: null, comprar_paquete_sesiones: null, precio_final: s.precio_personalizado ?? s.precio_base };
+    }));
+  }, [findPaqueteParaServicio, servicios]);
 
   const handleStylistChange = useCallback((id: string) => {
     const s = estilistas.find(e => (e.profesional_id || e._id) === id);
@@ -522,9 +587,9 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
     setSubmitError(null);
     try {
       const parsedAbono = Number(abonoAmount) || 0;
-      // Si toggle Pre-cita está OFF (false), asegurar que abono > 0 para que backend lo interprete como "confirmada"
-      // Si toggle está ON (true), enviar 0 para pre_reservada
-      const abonoToSend = isPreCita ? 0 : (parsedAbono > 0 ? parsedAbono : 0.01);
+      // El backend ya decide pre-cita vs. confirmada por el campo `estado` (ver abajo),
+      // no por abono > 0 — no hace falta forzar un abono falso para "confirmada".
+      const abonoToSend = isPreCita ? 0 : parsedAbono;
       await crearCita({
         sede_id: sedeId,
         cliente_id: selectedClient.cliente_id,
@@ -532,6 +597,8 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
         servicios: serviciosSeleccionados.map(s => ({
           servicio_id: s.servicio_id,
           precio_personalizado: s.precio_personalizado,
+          ...(s.paquete_id ? { paquete_id: s.paquete_id } : {}),
+          ...(s.comprar_paquete_sesiones ? { comprar_paquete_sesiones: s.comprar_paquete_sesiones } : {}),
         })),
         fecha: formatDateForBackend(selectedDate),
         hora_inicio: selectedTime,
@@ -662,23 +729,57 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
 
             {serviciosSeleccionados.length > 0 && (
               <div className="mt-2 space-y-1.5">
-                {serviciosSeleccionados.map(s => (
-                  <div key={s.servicio_id} className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs">
-                    <div className="flex-1 min-w-0">
-                      <span className="font-medium text-gray-900 truncate">{s.nombre}</span>
-                      <span className="text-gray-400 ml-1">· {s.duracion}min</span>
+                {serviciosSeleccionados.map(s => {
+                  const paquete = findPaqueteParaServicio(s.servicio_id);
+                  const servicioCompleto = servicios.find(sv => (sv.servicio_id || sv._id) === s.servicio_id);
+                  const tiers = servicioCompleto?.paquetes_sesiones || [];
+                  const tieneOpciones = !!paquete || tiers.length > 0;
+                  const modoActual = s.paquete_id ? "canjear" : s.comprar_paquete_sesiones ? `comprar:${s.comprar_paquete_sesiones}` : "normal";
+                  return (
+                    <div key={s.servicio_id} className="space-y-1">
+                      <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs">
+                        <div className="flex-1 min-w-0">
+                          <span className="font-medium text-gray-900 truncate">{s.nombre}</span>
+                          <span className="text-gray-400 ml-1">· {s.duracion}min</span>
+                        </div>
+                        {s.paquete_id ? (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">
+                            Cubierto por paquete
+                          </span>
+                        ) : (
+                          <input
+                            type="number"
+                            value={s.precio_personalizado !== null ? s.precio_personalizado : s.precio_final}
+                            onChange={e => updateServicePrice(s.servicio_id, e.target.value)}
+                            className="w-20 border border-gray-200 rounded px-1.5 py-1 text-[10px] text-right focus:outline-none focus:border-gray-700"
+                          />
+                        )}
+                        <button onClick={() => removeService(s.servicio_id)} className="text-red-400 hover:text-red-600 flex-shrink-0">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      {tieneOpciones && (
+                        <select
+                          value={modoActual}
+                          onChange={e => setModoCobroServicio(s.servicio_id, e.target.value)}
+                          className="w-full border border-gray-200 rounded px-2 py-1 text-[11px] text-gray-700 focus:outline-none focus:border-gray-700"
+                        >
+                          <option value="normal">Precio normal ({currency} {s.precio_base})</option>
+                          {paquete && (
+                            <option value="canjear">
+                              Usar sesión del paquete (quedan {paquete.sesiones_restantes} de {paquete.sesiones_totales})
+                            </option>
+                          )}
+                          {tiers.map(t => (
+                            <option key={t.sesiones} value={`comprar:${t.sesiones}`}>
+                              Comprar paquete de {t.sesiones} sesiones — {currency} {t.precio}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                     </div>
-                    <input
-                      type="number"
-                      value={s.precio_personalizado !== null ? s.precio_personalizado : s.precio_base}
-                      onChange={e => updateServicePrice(s.servicio_id, e.target.value)}
-                      className="w-20 border border-gray-200 rounded px-1.5 py-1 text-[10px] text-right focus:outline-none focus:border-gray-700"
-                    />
-                    <button onClick={() => removeService(s.servicio_id)} className="text-red-400 hover:text-red-600 flex-shrink-0">
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
+                  );
+                })}
                 <div className="flex justify-end text-xs font-semibold text-gray-900 pr-1">
                   {currency} {montoTotal} · {duracionTotal} min
                 </div>
@@ -787,7 +888,9 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
               {serviciosSeleccionados.map(s => (
                 <div key={s.servicio_id} className="flex justify-between text-xs">
                   <span className="text-gray-700">{s.nombre} <span className="text-gray-400">({s.duracion}min)</span></span>
-                  <span className="font-semibold">{currency} {s.precio_final}</span>
+                  <span className="font-semibold">
+                    {s.paquete_id ? <span className="text-emerald-700">Cubierto por paquete</span> : `${currency} ${s.precio_final}`}
+                  </span>
                 </div>
               ))}
             </div>

@@ -111,7 +111,8 @@ export const sedeService = {
       pais: sede.pais || "Colombia",
       moneda: sede.moneda || "COP",
       telefono: sede.telefono,
-      email: sede.email
+      email: sede.email,
+      reglas_comision: sede.reglas_comision || { tipo: "servicios" }
       // NO ENVIAR: sede_id, activa - el backend los genera automáticamente
     };
 
@@ -145,7 +146,8 @@ export const sedeService = {
       moneda: sede.moneda || "COP",
       telefono: sede.telefono,
       email: sede.email,
-      activa: sede.activa // Incluir activa para actualización
+      activa: sede.activa, // Incluir activa para actualización
+      reglas_comision: sede.reglas_comision || { tipo: "servicios" }
     };
 
     console.log('📤 Actualizando sede:', requestData);

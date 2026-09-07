@@ -86,13 +86,6 @@ export function ServicesList({ services, onEdit, onDelete }: ServicesListProps) 
               </span>
             </div>
 
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-gray-600">Comisión estilista</span>
-              <span className="font-semibold text-[oklch(0.55_0.25_280)]">
-                {service.comision_porcentaje}%
-              </span>
-            </div>
-
             {/* Requiere producto */}
             <div className="flex items-center justify-between text-sm">
               <span className="flex items-center gap-1 text-gray-600">

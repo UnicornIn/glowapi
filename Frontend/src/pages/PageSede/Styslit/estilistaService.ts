@@ -1,6 +1,29 @@
 import { API_BASE_URL } from "../../../types/config";
 import type { Estilista, CreateEstilistaData } from "../../../types/estilista";
 
+interface Disponibilidad {
+  dia_semana: number;
+  hora_inicio: string;
+  hora_fin: string;
+  activo: boolean;
+}
+
+interface HorarioData {
+  profesional_id: string;
+  sede_id: string;
+  disponibilidad: Disponibilidad[];
+}
+
+interface HorarioResponse {
+  _id: string;
+  sede_id: string;
+  disponibilidad: Disponibilidad[];
+  creado_por: string;
+  fecha_creacion: string;
+  unique_id: string;
+  profesional_id: string;
+}
+
 // Interface para la respuesta de la API
 interface ApiEstilista {
   [key: string]: unknown;
@@ -83,7 +106,7 @@ export const estilistaService = {
     });
 
     if (!response.ok) {
-      throw new Error(`Error al obtener estilistas: ${response.statusText}`);
+      throw new Error(`Error al obtener profesionales: ${response.statusText}`);
     }
 
     const data: ApiEstilista[] = await response.json();
@@ -240,11 +263,15 @@ export const estilistaService = {
       sede_id: estilistaData.sede_id,
       especialidades: true,
       activo: estilistaData.activo ?? true,
-      password:
-        typeof estilistaData.password === "string" && estilistaData.password.trim()
-          ? estilistaData.password.trim()
-          : "Temporal123!",
     };
+
+    // Solo enviar `password` si el admin escribió una nueva de verdad — el
+    // backend ahora la aplica de verdad al login real (collection_auth), así
+    // que un valor por defecto acá resetearía la contraseña del profesional
+    // en cualquier edición normal (nombre, teléfono, activo, etc.).
+    if (typeof estilistaData.password === "string" && estilistaData.password.trim()) {
+      requestData.password = estilistaData.password.trim();
+    }
 
     // Solo enviar comision si tiene valor
     if (estilistaData.comision !== undefined) {
@@ -257,6 +284,17 @@ export const estilistaService = {
 
     if (typeof estilistaData.telefono === "string") {
       requestData.telefono = estilistaData.telefono.trim();
+    }
+
+    // comisiones_por_categoria / comisiones_por_servicio llegan ya armadas
+    // desde estilista-form-modal.tsx (buildServiceCommissionPatch), pero este
+    // whitelist las descartaba silenciosamente al reconstruir requestData.
+    if (estilistaData.comisiones_por_categoria !== undefined) {
+      requestData.comisiones_por_categoria = estilistaData.comisiones_por_categoria;
+    }
+
+    if (estilistaData.comisiones_por_servicio !== undefined) {
+      requestData.comisiones_por_servicio = estilistaData.comisiones_por_servicio;
     }
 
     console.log('📤 Actualizando estilista:', requestData);
@@ -275,7 +313,7 @@ export const estilistaService = {
       const errorData = await response.json().catch(() => null);
       throw new Error(
         formatApiErrorDetail(errorData?.detail) ||
-          `Error al actualizar estilista: ${response.statusText}`,
+          `Error al actualizar profesional: ${response.statusText}`,
       );
     }
 
@@ -320,6 +358,69 @@ export const estilistaService = {
     };
   },
 
+  // Función para crear horario
+  async createHorario(token: string, horarioData: HorarioData): Promise<HorarioResponse> {
+    const response = await fetch(`${API_BASE_URL}scheduling/schedule/`, {
+      method: 'POST',
+      headers: {
+        'accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(horarioData)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      throw new Error(errorData?.detail || `Error al crear horario: ${response.statusText}`);
+    }
+
+    return await response.json();
+  },
+
+  // Función para obtener horario por profesional_id
+  async getHorarioByProfesional(token: string, profesionalId: string): Promise<HorarioResponse | null> {
+    try {
+      const response = await fetch(`${API_BASE_URL}scheduling/schedule/stylist/${profesionalId}`, {
+        method: 'GET',
+        headers: {
+          'accept': 'application/json',
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        if (response.status === 404) return null;
+        throw new Error(`Error al obtener horario: ${response.statusText}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('❌ Error obteniendo horario:', error);
+      return null;
+    }
+  },
+
+  // Función para actualizar horario
+  async updateHorario(token: string, horarioId: string, horarioData: HorarioData): Promise<HorarioResponse> {
+    const response = await fetch(`${API_BASE_URL}scheduling/schedule/${horarioId}`, {
+      method: 'PUT',
+      headers: {
+        'accept': 'application/json',
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(horarioData)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      throw new Error(errorData?.detail || `Error al actualizar horario: ${response.statusText}`);
+    }
+
+    return await response.json();
+  },
+
   async updateServiceCommissions(
     token: string,
     profesionalId: string,
@@ -344,7 +445,7 @@ export const estilistaService = {
       const errorData = await response.json().catch(() => null);
       throw new Error(
         formatApiErrorDetail(errorData?.detail) ||
-          `Error al actualizar comisiones del estilista: ${response.statusText}`,
+          `Error al actualizar comisiones del profesional: ${response.statusText}`,
       );
     }
 
@@ -375,7 +476,7 @@ export const estilistaService = {
       const errorData = await response.json().catch(() => null);
       throw new Error(
         formatApiErrorDetail(errorData?.detail) ||
-          `Error al actualizar servicios del estilista: ${response.statusText}`,
+          `Error al actualizar servicios del profesional: ${response.statusText}`,
       );
     }
 
@@ -393,7 +494,7 @@ export const estilistaService = {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => null);
-      throw new Error(errorData?.detail || `Error al eliminar estilista: ${response.statusText}`);
+      throw new Error(errorData?.detail || `Error al eliminar profesional: ${response.statusText}`);
     }
   },
 
@@ -407,7 +508,7 @@ export const estilistaService = {
     });
 
     if (!response.ok) {
-      throw new Error(`Error al obtener estilista: ${response.statusText}`);
+      throw new Error(`Error al obtener profesional: ${response.statusText}`);
     }
 
     const data: ApiEstilista = await response.json();

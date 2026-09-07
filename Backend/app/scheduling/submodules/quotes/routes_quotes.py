@@ -31,7 +31,8 @@ from app.database.mongo import (
     collection_commissions,
     collection_products,
     collection_inventarios,
-    collection_pre_bookings
+    collection_pre_bookings,
+    collection_client_packages
 )
 from app.cash.utils_cash import fecha_a_datetime
 from app.auth.routes import get_current_user
@@ -57,6 +58,9 @@ async def enviar_correo(destinatario: str, asunto: str, mensaje: str):
     try:
         from app.utils.branding import get_config
         _cfg = await get_config()
+        if not _cfg.get("emails_habilitados", True):
+            print(f"📭 Envío de correos desactivado (business_config.emails_habilitados=false) — se omite el correo a {destinatario}")
+            return
         msg = EmailMessage()
         msg["Subject"] = asunto
         msg["From"] = formataddr((_cfg.get("nombre_negocio", "GlowUp"), EMAIL_SENDER))
@@ -532,9 +536,69 @@ async def crear_cita(
         if not servicio_db:
             raise HTTPException(status_code=404, detail=f"Servicio {servicio_item.servicio_id} no encontrado")
 
+        # ⭐ PAQUETE DE SESIONES: si esta línea se cubre con un paquete ya
+        # comprado por el cliente, no se cobra de nuevo (precio=0). Solo es
+        # una validación "blanda" (de saldo) para dar feedback inmediato al
+        # agendar — el descuento real y definitivo de la sesión ocurre recién
+        # al facturar la cita (mismo punto donde ya se liquidan comisiones),
+        # para no dejar sesiones reservadas "en el aire" si la cita se cancela.
+        paquete_id_redimido = servicio_item.paquete_id
+        if paquete_id_redimido:
+            paquete_doc = await collection_client_packages.find_one({"paquete_id": paquete_id_redimido})
+            if not paquete_doc:
+                raise HTTPException(status_code=404, detail=f"Paquete de sesiones {paquete_id_redimido} no encontrado")
+            if paquete_doc.get("cliente_id") != cita.cliente_id:
+                raise HTTPException(status_code=400, detail="El paquete de sesiones no pertenece a este cliente")
+            if paquete_doc.get("servicio_id") != servicio_item.servicio_id:
+                raise HTTPException(status_code=400, detail="El paquete de sesiones no aplica para este servicio")
+            if not paquete_doc.get("activo", True):
+                raise HTTPException(status_code=400, detail="El paquete de sesiones ya no está activo")
+            if int(paquete_doc.get("sesiones_restantes", 0)) < cantidad:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"El paquete solo tiene {paquete_doc.get('sesiones_restantes', 0)} sesión(es) disponible(s)"
+                )
+
+        # ⭐ COMPRAR PAQUETE NUEVO: esta cita paga el paquete completo (ej. 5
+        # sesiones por 750.000) — debe matchear una opción configurada en el
+        # propio servicio (`paquetes_sesiones`). El paquete se crea recién al
+        # facturar (ver bills/routes.py), con esta primera sesión ya
+        # descontada del saldo.
+        paquete_a_comprar = None
+        if servicio_item.comprar_paquete_sesiones:
+            if paquete_id_redimido:
+                raise HTTPException(status_code=400, detail="No se puede comprar un paquete nuevo y canjear uno existente en la misma línea")
+            opciones = servicio_db.get("paquetes_sesiones") or []
+            paquete_a_comprar = next(
+                (o for o in opciones if int(o.get("sesiones", 0)) == servicio_item.comprar_paquete_sesiones),
+                None
+            )
+            if not paquete_a_comprar:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Este servicio no tiene un paquete de {servicio_item.comprar_paquete_sesiones} sesiones configurado"
+                )
+            if cantidad != 1:
+                raise HTTPException(status_code=400, detail="Comprar un paquete de sesiones solo admite cantidad 1 por línea")
+
         # ⭐ DETERMINAR PRECIO
         es_personalizado = False
-        if servicio_item.precio_personalizado is not None and servicio_item.precio_personalizado > 0:
+        if paquete_id_redimido:
+            # Ya pagado al comprar el paquete — esta sesión no se vuelve a cobrar.
+            precio = 0.0
+            es_personalizado = False
+        elif paquete_a_comprar:
+            # Se cobra el paquete completo de una vez (no el precio por sesión).
+            # Admite precio personalizado igual que un servicio normal (ej. un
+            # descuento puntual para ese cliente) — si no se manda uno válido,
+            # se usa el precio de la opción de paquete configurada.
+            if servicio_item.precio_personalizado is not None and servicio_item.precio_personalizado > 0:
+                precio = float(servicio_item.precio_personalizado)
+                es_personalizado = True
+            else:
+                precio = float(paquete_a_comprar["precio"])
+                es_personalizado = False
+        elif servicio_item.precio_personalizado is not None and servicio_item.precio_personalizado > 0:
             # Precio personalizado válido
             precio = float(servicio_item.precio_personalizado)
             es_personalizado = True
@@ -567,7 +631,9 @@ async def crear_cita(
             "precio_personalizado": es_personalizado,  # ⭐ BOOLEANO
             "precio": round(precio, 2),  # ⭐ SIEMPRE guardar el precio unitario usado
             "cantidad": cantidad,
-            "subtotal": subtotal
+            "subtotal": subtotal,
+            **({"paquete_id": paquete_id_redimido} if paquete_id_redimido else {}),
+            **({"comprar_paquete_sesiones": servicio_item.comprar_paquete_sesiones} if paquete_a_comprar else {}),
         }
         servicios_procesados.append(servicio_guardado)
 
@@ -1931,6 +1997,59 @@ async def cancelar_cita(cita_id: str, current_user: dict = Depends(get_current_u
     }
 
 # =============================================================
+# 🔹 ELIMINAR CITA (hard delete)
+# =============================================================
+# A diferencia del resto del proyecto (que casi siempre usa soft-delete),
+# aquí sí se borra el documento: el negocio pidió explícitamente poder
+# eliminar por completo una cita cancelada / marcada como "no asistió" para
+# no dejar basura en la agenda. Los efectos financieros de cancelar (liberar
+# giftcard, acreditar saldo a favor) ya se registraron en sus propias
+# colecciones al momento de cancelar — no se pierden al borrar la cita.
+# Por seguridad, se bloquea si ya existe una ficha o una factura vinculada
+# (no debería pasar para estos estados, pero mejor no confiar en eso).
+@router.delete("/{cita_id}", response_model=dict)
+async def eliminar_cita(cita_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("rol") not in ["super_admin", "admin_sede"]:
+        raise HTTPException(status_code=403, detail="No autorizado para eliminar citas")
+
+    cita = await resolve_cita_by_id(cita_id)
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    if current_user.get("rol") == "admin_sede" and cita.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes eliminar citas de tu propia sede")
+
+    estado_actual = (cita.get("estado") or "").lower().strip()
+    if estado_actual not in ("cancelada", "no_asistio", "no asistio", "pre_reservada"):
+        raise HTTPException(
+            status_code=400,
+            detail="Solo se pueden eliminar citas canceladas, marcadas como 'no asistió' o pre-reservadas",
+        )
+
+    cita_id_str = str(cita["_id"])
+
+    ficha_vinculada = await collection_card.find_one({"datos_especificos.cita_id": cita_id_str})
+    if ficha_vinculada:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar: esta cita tiene una ficha técnica asociada",
+        )
+
+    from app.database.mongo import collection_invoices
+    factura_vinculada = await collection_invoices.find_one({"cita_id": cita_id_str})
+    if factura_vinculada:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar: esta cita ya tiene una factura asociada",
+        )
+
+    result = await collection_citas.delete_one({"_id": cita["_id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    return {"success": True, "mensaje": "Cita eliminada permanentemente", "cita_id": cita_id}
+
+# =============================================================
 # 🔹 CONFIRMAR CITA
 # =============================================================
 @router.post("/{cita_id}/confirmar", response_model=dict)
@@ -2441,6 +2560,138 @@ async def registrar_pago(
         }
 
     return respuesta
+
+# =============================================================
+# 🔹 CORREGIR UN PAGO YA REGISTRADO (método y/o monto)
+# =============================================================
+# Para el caso real de que recepción se equivoque al registrar un pago (ej.
+# marcó "efectivo" cuando fue "transferencia", o tipeó un monto que no era).
+# Bloqueado por completo si la cita ya fue facturada — en ese punto la
+# factura ya quedó emitida con los valores originales, y corregir el
+# historial después la dejaría inconsistente con lo que el cliente recibió.
+# También bloqueado para pagos en giftcard/saldo_a_favor — esos ya generaron
+# movimientos reales en otras colecciones (giftcards, crédito del cliente)
+# que quedarían desincronizados si se les cambia el monto o el método acá.
+METODOS_PAGO_CORREGIBLES = {
+    "efectivo", "transferencia", "tarjeta", "tarjeta_credito", "tarjeta_debito",
+    "otros", "addi", "link_de_pago", "descuento_nomina", "abono_transferencia",
+    "sin_pago",
+}
+
+
+class CorregirPagoRequest(BaseModel):
+    metodo: Optional[str] = Field(None, description="Nuevo método de pago para este registro del historial")
+    monto: Optional[float] = Field(None, gt=0, description="Nuevo monto para este registro del historial")
+
+
+@router.patch("/{cita_id}/pagos/{indice}", response_model=dict)
+async def corregir_pago(
+    cita_id: str,
+    indice: int,
+    data: CorregirPagoRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    if current_user.get("rol") not in ["super_admin", "admin_sede", "recepcionista", "call_center"]:
+        raise HTTPException(status_code=403, detail="No autorizado para corregir pagos")
+
+    if data.metodo is None and data.monto is None:
+        raise HTTPException(status_code=400, detail="Debe enviar 'metodo' y/o 'monto' para corregir")
+
+    cita = await resolve_cita_by_id(cita_id)
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    if current_user.get("rol") == "admin_sede" and cita.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes corregir pagos de tu propia sede")
+
+    if cita.get("estado_factura") == "facturado":
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede corregir un pago de una cita ya facturada",
+        )
+
+    historial_pagos = cita.get("historial_pagos") or []
+    if indice < 0 or indice >= len(historial_pagos):
+        raise HTTPException(status_code=404, detail="Pago no encontrado en el historial de esta cita")
+
+    pago_actual = historial_pagos[indice]
+    metodo_actual = (pago_actual.get("metodo") or "").lower().strip()
+
+    if metodo_actual in ("giftcard", "saldo_a_favor"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede corregir un pago registrado como '{metodo_actual}' — ya generó un movimiento vinculado (giftcard/saldo a favor).",
+        )
+
+    update_set = {}
+
+    if data.metodo is not None:
+        nuevo_metodo = data.metodo.lower().strip()
+        if nuevo_metodo not in METODOS_PAGO_CORREGIBLES:
+            raise HTTPException(status_code=400, detail=f"Método de pago inválido: '{data.metodo}'")
+        update_set[f"historial_pagos.{indice}.metodo"] = nuevo_metodo
+
+    if data.monto is not None:
+        monto_viejo = round(float(pago_actual.get("monto", 0) or 0), 2)
+        monto_nuevo = round(float(data.monto), 2)
+        delta = round(monto_nuevo - monto_viejo, 2)
+
+        if delta != 0:
+            # El saldo de este pago y de todos los posteriores es un
+            # acumulado corrido — todos se desplazan por el mismo delta.
+            nuevo_saldo_de_este_pago = None
+            for j in range(indice, len(historial_pagos)):
+                saldo_viejo_j = round(float(historial_pagos[j].get("saldo_despues", 0) or 0), 2)
+                nuevo_saldo_j = round(saldo_viejo_j - delta, 2)
+                update_set[f"historial_pagos.{j}.saldo_despues"] = nuevo_saldo_j
+                if j == indice:
+                    nuevo_saldo_de_este_pago = nuevo_saldo_j
+            update_set[f"historial_pagos.{indice}.monto"] = monto_nuevo
+
+            # El "tipo" (abono_inicial / pago_adicional / pago_completo) se
+            # decidió con el monto viejo — si el monto cambia, puede dejar
+            # de tener sentido (ej. un "Pago completo" corregido a un monto
+            # que ya no cubre el total). Misma regla que al registrar un
+            # pago nuevo: solo el PRIMER pago del historial puede ser
+            # "pago_completo" o "abono_inicial" según si cubre el total;
+            # cualquier pago posterior siempre es "pago_adicional" y no
+            # cambia de tipo al corregirse.
+            if indice == 0 and nuevo_saldo_de_este_pago is not None:
+                update_set[f"historial_pagos.{indice}.tipo"] = (
+                    "pago_completo" if nuevo_saldo_de_este_pago <= 0 else "abono_inicial"
+                )
+
+            valor_total = round(float(cita.get("valor_total", 0) or 0), 2)
+            abono_actual = round(float(cita.get("abono", 0) or 0), 2)
+            nuevo_abono = round(abono_actual + delta, 2)
+            nuevo_saldo_pendiente = max(0.0, round(valor_total - nuevo_abono, 2))
+
+            update_set["abono"] = num(nuevo_abono)
+            update_set["saldo_pendiente"] = num(nuevo_saldo_pendiente)
+            update_set["estado_pago"] = (
+                "pagado" if nuevo_saldo_pendiente <= 0
+                else "abonado" if nuevo_abono > 0
+                else "pendiente"
+            )
+
+    update_set[f"historial_pagos.{indice}.corregido_por"] = current_user.get("email")
+    update_set[f"historial_pagos.{indice}.corregido_en"] = datetime.now()
+
+    await collection_citas.update_one(
+        {"_id": cita["_id"]},
+        {"$set": update_set}
+    )
+
+    return {
+        "success": True,
+        "mensaje": "Pago corregido",
+        "metodo": update_set.get(f"historial_pagos.{indice}.metodo"),
+        "monto": update_set.get(f"historial_pagos.{indice}.monto"),
+        "tipo": update_set.get(f"historial_pagos.{indice}.tipo"),
+        "abono": update_set.get("abono"),
+        "saldo_pendiente": update_set.get("saldo_pendiente"),
+        "estado_pago": update_set.get("estado_pago"),
+    }
 
 # =============================================================
 # 🔹 MOSTRAR PAGO ACTUALIZADO

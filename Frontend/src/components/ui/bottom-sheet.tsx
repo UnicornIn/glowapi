@@ -44,7 +44,11 @@ export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, 
         aria-label="Cerrar"
       />
 
+      {/* data-bottom-sheet-panel permite que un contenido que necesite más
+          ancho (ej. las historias clínicas) ensanche el panel desde su propio
+          CSS, sin tener que propagar props por toda la pantalla. */}
       <div
+        data-bottom-sheet-panel
         role="dialog"
         aria-modal="true"
         aria-label={title || "Detalle"}

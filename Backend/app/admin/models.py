@@ -53,7 +53,17 @@ class Profesional(BaseModel):
         default=None,
         description="Mapa de comisiones por categoría. Ej: {'Peluquería': 35, 'Color': 45}"
     )
-    password: str
+    comisiones_por_servicio: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Mapa de comisiones por servicio específico, clave=servicio_id. "
+                     "Mismo modelo que comisiones_por_categoria pero más específico: "
+                     "gana sobre la comisión por categoría cuando ambas aplican. "
+                     "Ej: {'SV-43903': 40, 'SV-51201': 30}"
+    )
+    # Opcional: al crear, la ruta exige que venga (ver routes_profesionales.py);
+    # al editar, ausente/vacío significa "no tocar la contraseña actual" — no
+    # se debe reinterpretar un valor vacío como "resetear a algo por defecto".
+    password: Optional[str] = None
 
     @validator('comisiones_por_categoria')
     def validar_comisiones_por_categoria(cls, v):
@@ -65,6 +75,19 @@ class Profesional(BaseModel):
                 raise ValueError('Cada categoría debe ser un texto no vacío')
             if porcentaje < 0 or porcentaje > 100:
                 raise ValueError(f'Comisión de "{categoria}" debe estar entre 0 y 100')
+
+        return v
+
+    @validator('comisiones_por_servicio')
+    def validar_comisiones_por_servicio(cls, v):
+        if v is None:
+            return v
+
+        for servicio_id, porcentaje in v.items():
+            if not isinstance(servicio_id, str) or not servicio_id.strip():
+                raise ValueError('Cada servicio_id debe ser un texto no vacío')
+            if porcentaje < 0 or porcentaje > 100:
+                raise ValueError(f'Comisión del servicio "{servicio_id}" debe estar entre 0 y 100')
 
         return v
 
@@ -83,6 +106,18 @@ class ServicioAdmin(BaseModel):
     requiere_producto: bool = Field(default=False, description="Indica si requiere producto")
     activo: bool = Field(default=True, description="Indica si el servicio está activo")
     requiere_ficha: bool = Field(default=False, description="Indica si requiere ficha de cliente")
+
+    # Paquetes de sesiones prepagas del propio servicio (ej. "Terapia
+    # individual piso pélvico" puede venderse suelta, o en un paquete de 5
+    # por 750.000, o de 10 por 1.450.000). A propósito NO es un servicio
+    # aparte — un servicio con paquetes sigue siendo el mismo servicio que se
+    # agenda siempre; los paquetes solo son opciones de precio/cantidad sobre
+    # él (se decidió así tras que la primera versión, con el paquete como un
+    # "servicio" distinto apuntando a otro, generaba tarjetas duplicadas y
+    # confusas en la lista de Servicios).
+    paquetes_sesiones: Optional[List["PaqueteSesionesOpcion"]] = Field(
+        None, description="Opciones de paquete de sesiones prepagas para este servicio"
+    )
 
     # IDs relacionales
     sede_id: Optional[str] = Field(None, description="ID de la sede")
@@ -109,6 +144,31 @@ class ServicioAdmin(BaseModel):
         if v is not None and (v < 0 or v > 100):
             raise ValueError('Comisión debe estar entre 0 y 100')
         return v
+
+    @validator('paquetes_sesiones')
+    def validar_paquetes_sesiones(cls, v):
+        if v is None:
+            return v
+        vistos = set()
+        for opcion in v:
+            if opcion.sesiones in vistos:
+                raise ValueError(f'Ya hay un paquete de {opcion.sesiones} sesiones — no puede repetirse')
+            vistos.add(opcion.sesiones)
+        return v
+
+
+class PaqueteSesionesOpcion(BaseModel):
+    sesiones: int = Field(..., ge=2, description="Cantidad de sesiones que incluye este paquete (2 o más)")
+    precio: float = Field(..., gt=0, description="Precio total del paquete completo, en la moneda de la sede")
+
+    @validator('precio')
+    def validar_precio_paquete(cls, v):
+        if v <= 0:
+            raise ValueError('El precio del paquete debe ser mayor a 0')
+        return v
+
+
+ServicioAdmin.update_forward_refs()
 
 class Franquicia(BaseModel):
     nombre: str

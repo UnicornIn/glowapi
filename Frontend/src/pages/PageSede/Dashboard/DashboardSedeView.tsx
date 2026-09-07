@@ -934,7 +934,7 @@ export function DashboardSedeView({
       </div>
 
       {/* ══ RENDIMIENTO POR ESTILISTA ════════════════════════ */}
-      <SectionTitle>Rendimiento por estilista</SectionTitle>
+      <SectionTitle>Rendimiento por profesional</SectionTitle>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-8">
         <Card title="Ranking por ingreso generado" action={stylistsPath ? <button onClick={() => navigate(stylistsPath)} className="text-[11.5px] text-[#9b9b97] hover:text-[#0a0a0a] cursor-pointer transition-colors">Ver todos →</button> : undefined}>
@@ -956,7 +956,7 @@ export function DashboardSedeView({
               })}
             </div>
           ) : (
-            <p className="text-[12.5px] text-[#9b9b97] py-8 text-center">Sin datos de estilistas para este período</p>
+            <p className="text-[12.5px] text-[#9b9b97] py-8 text-center">Sin datos de profesionales para este período</p>
           )}
         </Card>
 
@@ -1009,7 +1009,7 @@ export function DashboardSedeView({
 
         const exportCSV = () => {
           if (filtered.length === 0) return;
-          const headers = ["Fecha", "Hora", "Cliente", "Correo", "Teléfono", "Estilista", "Servicio", "Estado"];
+          const headers = ["Fecha", "Hora", "Cliente", "Correo", "Teléfono", "Profesional", "Servicio", "Estado"];
           const rows = filtered.map((c: any) => [
             c.fecha || "",
             c.hora || c.hora_inicio || "",
@@ -1053,7 +1053,7 @@ export function DashboardSedeView({
                   <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-[13px] h-[13px] opacity-35 pointer-events-none" />
                   <input
                     type="text"
-                    placeholder="Buscar por cliente, correo o estilista…"
+                    placeholder="Buscar por cliente, correo o profesional…"
                     value={citasSearch}
                     onChange={(e) => { setCitasSearch(e.target.value); setCitasPage(1); }}
                     className="w-full pl-[30px] pr-2.5 py-1.5 border border-[#e8e8e6] rounded-[5px] text-[12.5px] bg-[#f7f7f6] text-[#0a0a0a] outline-none focus:border-[#d1d1cf] focus:bg-white transition-colors"
@@ -1075,7 +1075,7 @@ export function DashboardSedeView({
                   onChange={(e) => { setCitasFilterEstilista(e.target.value); setCitasPage(1); }}
                   className="px-2.5 py-1.5 border border-[#e8e8e6] rounded-[5px] text-[12.5px] bg-[#f7f7f6] text-[#6b6b68] outline-none cursor-pointer"
                 >
-                  <option value="">Todas las estilistas</option>
+                  <option value="">Todos los profesionales</option>
                   {estilistas.map((name) => (
                     <option key={name} value={name}>{name}</option>
                   ))}
@@ -1089,7 +1089,7 @@ export function DashboardSedeView({
               <table className="w-full border-collapse">
                 <thead className="bg-[#f7f7f6]">
                   <tr>
-                    {["Fecha", "Hora", "Cliente", "Correo electrónico", "Teléfono", "Estilista", "Servicio", "Estado"].map((h) => (
+                    {["Fecha", "Hora", "Cliente", "Correo electrónico", "Teléfono", "Profesional", "Servicio", "Estado"].map((h) => (
                       <th key={h} className="px-4 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.5px] text-[#9b9b97] whitespace-nowrap border-b border-[#e8e8e6] first:pl-5 last:pr-5">
                         {h}
                       </th>

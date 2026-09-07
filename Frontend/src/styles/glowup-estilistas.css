@@ -327,7 +327,12 @@
   gap: 0;
   border-bottom: 1px solid var(--gle-border);
   padding: 0 20px;
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
+.gle-panel-tabs::-webkit-scrollbar { height: 4px; }
+.gle-panel-tabs::-webkit-scrollbar-track { background: transparent; }
+.gle-panel-tabs::-webkit-scrollbar-thumb { background: var(--gle-border-strong); border-radius: 2px; }
 .gle-ptab {
   padding: 10px 8px;
   font-size: 12px;

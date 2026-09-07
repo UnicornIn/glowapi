@@ -493,6 +493,8 @@ async def listar_ingresos(
                 registrado_por=str(i.get("registrado_por") or i.get("registrado_por_email") or "sistema"),
                 registrado_por_nombre=i.get("registrado_por_nombre"),
                 creado_en=_as_datetime(i.get("creado_en"), _as_datetime(i.get("fecha"))),
+                caja=i.get("caja"),
+                origen=i.get("origen"),
             )
             for i in ingresos_list
         ]

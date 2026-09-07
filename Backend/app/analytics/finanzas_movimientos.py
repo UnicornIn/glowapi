@@ -82,6 +82,11 @@ class EgresoCajaMenorRequest(MovimientoBase):
     metodo_pago: Literal["efectivo", "transferencia", "pse"] = "efectivo"
 
 
+class IngresoCajaMenorRequest(MovimientoBase):
+    categoria  : Literal["reembolso", "ingreso_extraordinario", "otro"]
+    metodo_pago: Literal["efectivo", "transferencia", "pse"] = "efectivo"
+
+
 class TrasladoCajasRequest(BaseModel):
     sede_id     : str
     fecha       : str
@@ -231,6 +236,42 @@ async def registrar_egreso_caja_menor(
         **_auditoria(current_user),
     }
     return await _insertar(cash_expenses, doc)
+
+
+@router.post("/ingreso-caja-menor", status_code=201)
+async def registrar_ingreso_caja_menor(
+    payload     : IngresoCajaMenorRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Registra un ingreso manual de caja menor (reembolsos, ingresos
+    extraordinarios en efectivo…) que no viene de una venta/cita.
+    Usa la misma colección cash_incomes que routes_cash.py, con
+    caja='caja_menor', para que quede visible en GET /cash/ingresos y sea
+    eliminable con DELETE /cash/ingresos/{ingreso_id} igual que cualquier
+    otro ingreso manual.
+    """
+    _check_admin(current_user)
+    fecha = _parse_fecha(payload.fecha)
+
+    doc = {
+        "ingreso_id"     : generar_ingreso_id(),
+        "sede_id"        : payload.sede_id,
+        "fecha"          : fecha,
+        "categoria"      : payload.categoria,
+        "motivo"         : payload.concepto,
+        "descripcion"    : payload.observaciones,
+        "monto"          : payload.monto,
+        "moneda"         : "COP",
+        "metodo_pago"    : payload.metodo_pago,
+        # ── Clasificación contable ──
+        "caja"           : "caja_menor",
+        "origen"         : "manual_caja_menor",
+        "tipo_movimiento": "ingreso",
+        "afecta_pl"      : True,
+        **_auditoria(current_user),
+    }
+    return await _insertar(cash_incomes, doc)
 
 
 @router.post("/traslado", status_code=201)

@@ -24,7 +24,8 @@ export function SedeFormModal({ isOpen, onClose, onSave, sede,  isSaving = false
     zona_horaria: "America/Bogota",
     telefono: "",
     email: "",
-    activa: true
+    activa: true,
+    reglas_comision: { tipo: "servicios" }
   })
 
   // Resetear el formulario cuando se abre/cierra el modal o cambia la sede
@@ -39,7 +40,11 @@ export function SedeFormModal({ isOpen, onClose, onSave, sede,  isSaving = false
           zona_horaria: sede.zona_horaria,
           telefono: sede.telefono,
           email: sede.email,
-          activa: sede.activa
+          activa: sede.activa,
+          // Sedes creadas antes de que este campo existiera no lo traen: el
+          // backend ya asume "servicios" como default, así que se refleja
+          // igual acá en vez de dejarlo en blanco.
+          reglas_comision: sede.reglas_comision || { tipo: "servicios" }
         })
       } else {
         // Modo creación: resetear a valores por defecto
@@ -50,7 +55,8 @@ export function SedeFormModal({ isOpen, onClose, onSave, sede,  isSaving = false
           zona_horaria: "America/Bogota",
           telefono: "",
           email: "",
-          activa: true
+          activa: true,
+          reglas_comision: { tipo: "servicios" }
         })
       }
     }
@@ -76,7 +82,8 @@ export function SedeFormModal({ isOpen, onClose, onSave, sede,  isSaving = false
           zona_horaria: formData.zona_horaria!,
           telefono: formData.telefono!,
           email: formData.email!,
-          activa: formData.activa!
+          activa: formData.activa!,
+          reglas_comision: formData.reglas_comision || { tipo: "servicios" }
         }
         await onSave(sedeData)
       } else {
@@ -92,7 +99,8 @@ export function SedeFormModal({ isOpen, onClose, onSave, sede,  isSaving = false
           zona_horaria: formData.zona_horaria!,
           telefono: formData.telefono!,
           email: formData.email!,
-          activa: true // Las nuevas sedes siempre son activas
+          activa: true, // Las nuevas sedes siempre son activas
+          reglas_comision: formData.reglas_comision || { tipo: "servicios" }
         }
         await onSave(sedeData)
       }
@@ -213,6 +221,33 @@ export function SedeFormModal({ isOpen, onClose, onSave, sede,  isSaving = false
               <option value="America/New_York">New York</option>
               <option value="Europe/London">London</option>
             </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-sm font-medium text-gray-700">
+              Comisión por venta de productos
+            </label>
+            <select
+              value={formData.reglas_comision?.tipo || "servicios"}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  reglas_comision: { tipo: e.target.value as "servicios" | "productos" | "mixto" }
+                })
+              }
+              className="h-10 w-full rounded-md border border-gray-300 bg-white px-3 text-sm text-gray-900 shadow-sm focus:outline-none focus:ring-1 focus:ring-gray-500"
+              disabled={isSaving}
+            >
+              <option value="servicios">Solo servicios (los productos no generan comisión)</option>
+              <option value="productos">Solo productos</option>
+              <option value="mixto">Servicios y productos</option>
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              Si esta sede vende productos y quieres que generen comisión para
+              quien los vende, elige "Servicios y productos". Por defecto ninguna
+              venta de producto genera comisión, aunque esté bien configurada en
+              el profesional o el producto.
+            </p>
           </div>
 
           {sede && (

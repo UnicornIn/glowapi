@@ -1,7 +1,6 @@
 "use client"
 
-import { Clock, DollarSign, Percent, Tag, Pencil, Trash2 } from 'lucide-react'
-import { confirmAction } from '../../../components/ui/confirm-dialog'
+import { Clock, DollarSign, Tag, Pencil, Trash2 } from 'lucide-react'
 import type { Service } from "../../../types/service"
 
 interface ServicesListProps {
@@ -63,11 +62,6 @@ export function ServicesList({ services, onEdit, onDelete }: ServicesListProps) 
                 <Clock className="h-3 w-3 mr-1.5 flex-shrink-0" />
                 <span>{service.duracion} min</span>
               </div>
-              
-              <div className="flex items-center text-xs text-gray-600">
-                <Percent className="h-3 w-3 mr-1.5 flex-shrink-0" />
-                <span>{service.comision_porcentaje}% comisión</span>
-              </div>
             </div>
             
             {service.requiere_producto && (
@@ -86,12 +80,7 @@ export function ServicesList({ services, onEdit, onDelete }: ServicesListProps) 
               <Pencil className="h-3 w-3" />
             </button>
             <button
-              onClick={async () => {
-                const confirmed = await confirmAction({ title: "Confirmar", message: "¿Eliminar servicio?", confirmLabel: "Sí, eliminar", variant: "danger" });
-                if (confirmed) {
-                  onDelete(service.id);
-                }
-              }}
+              onClick={() => onDelete(service.id)}
               className="p-0.5 hover:bg-gray-100 text-gray-600"
               title="Eliminar"
             >

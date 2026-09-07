@@ -22,6 +22,7 @@ export interface Estilista {
   deleted_by?: string;
   comision: number | null;
   comisiones_por_categoria?: Record<string, number>;
+  comisiones_por_servicio?: Record<string, number>;
 }
 
 export type CreateEstilistaData = {
@@ -44,5 +45,6 @@ export type UpdateEstilistaData = {
   comision?: number | null;
   comision_productos?: number | null;
   comisiones_por_categoria?: Record<string, number>;
+  comisiones_por_servicio?: Record<string, number>;
   activo?: boolean;
 };

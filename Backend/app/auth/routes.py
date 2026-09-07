@@ -235,12 +235,14 @@ async def login(
 
     # Verificar contraseña
     try:
-        if not pwd_context.verify(password, user["hashed_password"]):
-            print("❌ Contraseña incorrecta para:", email)
-            raise HTTPException(status_code=400, detail="Contraseña incorrecta")
+        password_valida = pwd_context.verify(password, user["hashed_password"])
     except Exception as e:
         print(f"⚠️ Error al verificar contraseña: {e}")
         raise HTTPException(status_code=500, detail="Error verificando contraseña")
+
+    if not password_valida:
+        print("❌ Contraseña incorrecta para:", email)
+        raise HTTPException(status_code=400, detail="Contraseña incorrecta")
 
     # ✅ OBTENER EL ROL REAL DEL USUARIO desde la base de datos
     rol_real = user.get("rol")

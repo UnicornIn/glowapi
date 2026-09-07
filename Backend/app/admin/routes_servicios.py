@@ -4,7 +4,12 @@ from datetime import datetime
 
 from app.admin.models import ServicioAdmin
 from app.auth.routes import get_current_user
-from app.database.mongo import collection_servicios, collection_locales
+from app.database.mongo import (
+    collection_servicios,
+    collection_locales,
+    collection_citas,
+    collection_client_packages,
+)
 from app.id_generator.generator import generar_id, validar_id
 
 router = APIRouter(prefix="/admin/servicios", tags=["Admin - Servicios"])
@@ -246,8 +251,14 @@ async def actualizar_servicio(
 
 
 # ===================================================
-# ❌ Eliminar servicio (SOFT DELETE)
+# ❌ Eliminar servicio (HARD DELETE — distinto de desactivar)
 # ===================================================
+# A propósito NO es soft-delete: "desactivar" (campo `activo`, editable desde
+# el formulario) ya cubre "dejar de ofrecerlo sin perder historial" — pedir
+# además un "eliminar" que en realidad solo desactivaba era confuso (las dos
+# acciones se veían idénticas: el servicio quedaba "Inactivo" en ambos casos).
+# Esto SÍ borra el documento — por eso valida antes que no haya nada que se
+# rompería al desaparecer el servicio.
 @router.delete("/{servicio_id}", response_model=dict)
 async def eliminar_servicio(
     servicio_id: str,
@@ -274,25 +285,45 @@ async def eliminar_servicio(
                 "Solo puedes eliminar servicios de tu propia sede"
             )
 
+    id_real = servicio_actual.get("servicio_id") or str(servicio_actual["_id"])
+
+    # ⭐ Bloqueo 1: citas (cualquier estado, activas o históricas) que
+    # referencian este servicio — estructura nueva (array `servicios`) y la
+    # antigua de un solo servicio.
+    tiene_citas = await collection_citas.find_one({
+        "$or": [
+            {"servicios.servicio_id": id_real},
+            {"servicio_id": id_real},
+        ]
+    })
+    if tiene_citas:
+        raise HTTPException(
+            400,
+            "Este servicio tiene citas asociadas (activas o históricas) — no se puede eliminar sin perder ese historial. Desactívalo en su lugar para dejar de ofrecerlo."
+        )
+
+    # ⭐ Bloqueo 2: ya se vendieron paquetes de sesiones de este servicio —
+    # borrarlo dejaría esos saldos de cliente huérfanos (sin servicio al que
+    # canjearse).
+    paquetes_vendidos = await collection_client_packages.find_one({"servicio_id": id_real})
+    if paquetes_vendidos:
+        raise HTTPException(
+            400,
+            "Ya hay paquetes de sesiones vendidos ligados a este servicio — eliminarlo los dejaría huérfanos. Desactívalo en su lugar."
+        )
+
     filter_query = (
         {"servicio_id": servicio_id}
         if "servicio_id" in servicio_actual
         else {"_id": ObjectId(servicio_id)}
     )
 
-    result = await collection_servicios.update_one(
-        filter_query,
-        {"$set": {
-            "activo": False,
-            "deleted_at": datetime.now(),
-            "deleted_by": current_user["email"]
-        }}
-    )
+    result = await collection_servicios.delete_one(filter_query)
 
-    if result.matched_count == 0:
+    if result.deleted_count == 0:
         raise HTTPException(404, f"Servicio no encontrado con ID: {servicio_id}")
 
-    return {"msg": "Servicio eliminado correctamente", "servicio_id": servicio_id}
+    return {"msg": "Servicio eliminado permanentemente", "servicio_id": servicio_id}
 
 
 # ===================================================

@@ -108,7 +108,7 @@ export function ComisionesDetalle() {
                 </li>
                 <li className="flex items-start gap-2">
                   <div className="mt-1 h-2 w-2 rounded-full bg-[oklch(0.65_0.25_280)]"></div>
-                  <span>Estilista que realizó el servicio/venta</span>
+                  <span>Profesional que realizó el servicio/venta</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <div className="mt-1 h-2 w-2 rounded-full bg-[oklch(0.65_0.25_280)]"></div>
@@ -181,11 +181,11 @@ export function ComisionesDetalle() {
         <div className="grid gap-4 text-sm text-blue-700 md:grid-cols-2">
           <div>
             <p className="font-medium">Servicios:</p>
-            <p>Muestra todos los servicios prestados por los estilistas con sus respectivas comisiones.</p>
+            <p>Muestra todos los servicios prestados por los profesionales con sus respectivas comisiones.</p>
           </div>
           <div>
             <p className="font-medium">Productos:</p>
-            <p>Muestra los productos vendidos por los estilistas y las comisiones generadas.</p>
+            <p>Muestra los productos vendidos por los profesionales y las comisiones generadas.</p>
           </div>
         </div>
       </div>

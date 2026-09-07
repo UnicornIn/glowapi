@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
-import { AlertTriangle, Loader2, AlertCircle, Globe, Check, Building2, ChevronLeft, ChevronRight, Pencil, Plus, Search, SlidersHorizontal } from "lucide-react"
+import { AlertTriangle, Loader2, AlertCircle, ArrowRightLeft, Globe, Check, Building2, ChevronLeft, ChevronRight, Pencil, Plus, Search, SlidersHorizontal } from "lucide-react"
 import { SedeDropdown } from "../../../components/ui/SedeDropdown"
 import { features } from "../../../config/features"
 import { Button } from "../../../components/ui/button"
@@ -35,6 +35,14 @@ import {
   InventoryMovimientosTab,
   InventoryKardexTab,
 } from "../../PageSede/Products/ProductsInventoryViews"
+import {
+  crearProductoCatalogo,
+  obtenerProductoCatalogo,
+  actualizarProductoCatalogo,
+  eliminarProductoCatalogo,
+  crearTraslado,
+  type CatalogoProducto as CatalogoProductoCompleto,
+} from "../../PageSede/Products/inventarioApi"
 
 const normalizeText = (value: string | null | undefined): string =>
   (value ?? "")
@@ -83,10 +91,20 @@ export function ProductsList() {
   const [_countryCurrency, setCountryCurrency] = useState<Record<string, string>>({})
   const [_missingCountrySedes, setMissingCountrySedes] = useState<string[]>([])
   const [editingProductId, setEditingProductId] = useState<string | null>(null)
+  const [editingProductRealId, setEditingProductRealId] = useState<string | null>(null)
   const [editingName, setEditingName] = useState<string>("")
   const [editingPrice, setEditingPrice] = useState<string>("")
-  const [editingStock, setEditingStock] = useState<string>("")
   const [editingLoading, setEditingLoading] = useState<boolean>(false)
+  const [editingSaving, setEditingSaving] = useState<boolean>(false)
+  const [editingError, setEditingError] = useState<string | null>(null)
+  const [deletingProduct, setDeletingProduct] = useState<CatalogoProductoCompleto | null>(null)
+  const [isLoadingDeleteTarget, setIsLoadingDeleteTarget] = useState<string | null>(null)
+  const [isDeletingProduct, setIsDeletingProduct] = useState(false)
+  const [productoTrasladando, setProductoTrasladando] = useState<InventarioProducto | null>(null)
+  const [trasladoSedeDestino, setTrasladoSedeDestino] = useState("")
+  const [trasladoCantidad, setTrasladoCantidad] = useState("")
+  const [trasladoError, setTrasladoError] = useState<string | null>(null)
+  const [isTrasladando, setIsTrasladando] = useState(false)
   const [productPrices, setProductPrices] = useState<Record<string, { price: number; currency: string }>>({})
   const [isCreateProductModalOpen, setIsCreateProductModalOpen] = useState(false)
   const [newProductName, setNewProductName] = useState("")
@@ -628,9 +646,94 @@ export function ProductsList() {
     }
   }
 
+  /**
+   * Crea un producto NUEVO en el catálogo maestro (POST /inventary/product/productos/,
+   * solo super_admin) y, si se indicó stock inicial, lo asigna de una vez a la
+   * sede seleccionada reutilizando el flujo ya probado de "asignar producto del
+   * catálogo a la sede" (InventarioService.crearInventario).
+   */
+  const crearProductoNuevoDesdeCard = async () => {
+    const token = resolveToken()
+    if (!token) {
+      setCatalogoError("No se encontró token de autenticación")
+      return
+    }
+    if (!nuevoNombreManual.trim()) {
+      setCatalogoError("El nombre del producto es obligatorio")
+      return
+    }
+    const precioNum = Number(precioReferencia)
+    if (!precioReferencia || !Number.isFinite(precioNum) || precioNum <= 0) {
+      setCatalogoError("Ingresa un precio de venta válido")
+      return
+    }
+    const sedeDestino = (nuevoSedeId || resolveSedeId())?.trim()
+
+    try {
+      setIsCreatingInventario(true)
+      setCatalogoError(null)
+
+      const productoCreado = await crearProductoCatalogo(token, {
+        nombre: nuevoNombreManual.trim(),
+        codigo: nuevoSkuManual.trim() || undefined,
+        // El campo "Categoría" del modal es `tipoProducto`; "Marca" (`lineaFormulario`)
+        // no tiene campo equivalente en el backend, por eso no se manda.
+        categoria: tipoProducto || undefined,
+        precios: { COP: precioNum },
+        stock_actual: 0,
+        stock_minimo: Number(nuevoStockMinimo) || 0,
+      })
+
+      const stockInicialNum = Number(nuevoStockInicial) || 0
+      if (stockInicialNum > 0 && sedeDestino && productoCreado.id) {
+        const resultInventario = await inventarioService.crearInventario(
+          {
+            producto_id: productoCreado.id,
+            sede_id: sedeDestino,
+            stock_actual: stockInicialNum,
+            stock_minimo: Number(nuevoStockMinimo) || 0,
+          },
+          token,
+        )
+        if (!resultInventario.success) {
+          setSuccessMessage(
+            `"${productoCreado.nombre}" se creó en el catálogo, pero no se pudo asignar el stock inicial: ${resultInventario.error || "error desconocido"}.`,
+          )
+          setNuevoNombreManual("")
+          setNuevoSkuManual("")
+          setPrecioReferencia("")
+          setCostoReferencia("")
+          setIsNuevoProductoModalOpen(false)
+          if (sedeDestino) {
+            await Promise.all([cargarInventario(sedeDestino), cargarCatalogoProductosForm(sedeDestino)])
+          }
+          return
+        }
+      }
+
+      setSuccessMessage(`"${productoCreado.nombre}" creado en el catálogo`)
+      setNuevoNombreManual("")
+      setNuevoSkuManual("")
+      setNuevoStockInicial("0")
+      setNuevoStockMinimo("5")
+      setPrecioReferencia("")
+      setCostoReferencia("")
+      setTipoProducto("ACCESORIO")
+      setLineaFormulario(lineasDisponibles[0]?.id ?? "")
+      setIsNuevoProductoModalOpen(false)
+      if (sedeDestino) {
+        await Promise.all([cargarInventario(sedeDestino), cargarCatalogoProductosForm(sedeDestino)])
+      }
+    } catch (err) {
+      setCatalogoError(parseApiErrorSimple(err))
+    } finally {
+      setIsCreatingInventario(false)
+    }
+  }
+
   const crearInventarioDesdeCard = async () => {
     if (creacionModo === "manual") {
-      setCatalogoError("Crear producto desde cero está listo en UI. Conecta el endpoint de creación y reemplaza este aviso.")
+      await crearProductoNuevoDesdeCard()
       return
     }
 
@@ -1031,67 +1134,171 @@ export function ProductsList() {
     fetchPrices().catch(() => {})
   }, [productos, ventasCurrency, user])
 
+  /**
+   * `productId` es el id legible (o el _id) que trae la fila de la tabla —
+   * el GET individual acepta ambos, pero el PUT que persiste los cambios solo
+   * acepta el `_id` real de Mongo, por eso se resuelve el producto completo
+   * acá y se guarda `editingProductRealId` aparte.
+   */
   const openEditModal = async (productId: string) => {
-    const product = productCards.find((p) => p.id === productId)
-    if (!product) return
     setEditingProductId(productId)
-    setEditingName(product.nombre)
-    setEditingStock(
-      product.stock !== undefined && product.stock !== null
-        ? String(product.stock)
-        : "0"
-    )
+    setEditingProductRealId(null)
+    setEditingError(null)
     const cachedPrice = productPrices[productId]?.price
     setEditingPrice(cachedPrice !== undefined ? String(cachedPrice) : "")
     setEditingLoading(true)
     try {
       const token = resolveToken()
-      const moneda = ventasCurrency || "COP"
-      const resp = await fetch(
-        `${API_BASE_URL}inventary/product/productos/${encodeURIComponent(productId)}?moneda=${encodeURIComponent(moneda)}`,
-        {
-          headers: {
-            Accept: "application/json",
-            Authorization: token ? `Bearer ${token}` : "",
-          },
-        }
-      )
-      if (resp.ok) {
-        const data = await resp.json() as any
-        const precio =
-          data?.precio_local ??
-          data?.precio ??
-          (data?.precios && (data.precios[moneda] ?? data.precios.USD)) ??
-          ""
-        setEditingPrice(
-          precio !== null && precio !== undefined
-            ? String(precio)
-            : cachedPrice !== undefined
-              ? String(cachedPrice)
-              : ""
-        )
+      if (!token) {
+        setEditingError("No se encontró token de autenticación")
+        return
       }
+      const productoCompleto = await obtenerProductoCatalogo(token, productId)
+      setEditingProductRealId(productoCompleto._id)
+      setEditingName(productoCompleto.nombre || "")
+      const moneda = (ventasCurrency || "COP").toUpperCase()
+      const precio = productoCompleto.precios?.[moneda as "COP" | "USD" | "MXN"] ?? productoCompleto.precios?.COP
+      setEditingPrice(
+        precio !== undefined && precio !== null
+          ? String(precio)
+          : cachedPrice !== undefined
+            ? String(cachedPrice)
+            : ""
+      )
     } catch (err) {
-      console.warn("No se pudo obtener precio del producto", err)
+      setEditingError(err instanceof Error ? err.message : "No se pudo cargar el producto")
     } finally {
       setEditingLoading(false)
     }
   }
 
-  const handleSaveEdit = () => {
-    if (!editingProductId) return
-    setProductos((prev) =>
-      prev.map((p) =>
-        (p.producto_id || p._id) === editingProductId
-          ? {
-              ...p,
-              nombre: editingName || p.nombre,
-              stock_actual: Number(editingStock) || 0,
-            }
-          : p
-      )
-    )
-    setEditingProductId(null)
+  const handleSaveEdit = async () => {
+    const token = resolveToken()
+    if (!token || !editingProductRealId) {
+      setEditingError("No se encontró el producto a editar")
+      return
+    }
+    if (!editingName.trim()) {
+      setEditingError("El nombre del producto es obligatorio")
+      return
+    }
+    const precioNum = Number(editingPrice)
+    if (!editingPrice || !Number.isFinite(precioNum) || precioNum <= 0) {
+      setEditingError("Ingresa un precio válido")
+      return
+    }
+
+    setEditingSaving(true)
+    setEditingError(null)
+    try {
+      await actualizarProductoCatalogo(token, editingProductRealId, {
+        nombre: editingName.trim(),
+        precios: { [(ventasCurrency || "COP").toUpperCase()]: precioNum },
+      })
+      setSuccessMessage(`"${editingName.trim()}" actualizado`)
+      setEditingProductId(null)
+      setEditingProductRealId(null)
+      const sedeActual = resolveSedeId(selectedDashboardSede)
+      if (sedeActual) {
+        await cargarInventario(sedeActual)
+      }
+    } catch (err) {
+      setEditingError(err instanceof Error ? err.message : "No se pudo guardar el producto")
+    } finally {
+      setEditingSaving(false)
+    }
+  }
+
+  const abrirEliminarProducto = async (productId: string) => {
+    const token = resolveToken()
+    if (!token) {
+      setError("No se encontró token de autenticación")
+      return
+    }
+    setIsLoadingDeleteTarget(productId)
+    try {
+      const productoCompleto = await obtenerProductoCatalogo(token, productId)
+      setDeletingProduct(productoCompleto)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo cargar el producto")
+    } finally {
+      setIsLoadingDeleteTarget(null)
+    }
+  }
+
+  const confirmarEliminarProducto = async () => {
+    const token = resolveToken()
+    if (!token || !deletingProduct) return
+    setIsDeletingProduct(true)
+    try {
+      await eliminarProductoCatalogo(token, deletingProduct._id)
+      setSuccessMessage(`"${deletingProduct.nombre}" eliminado del catálogo`)
+      setDeletingProduct(null)
+      const sedeActual = resolveSedeId(selectedDashboardSede)
+      if (sedeActual) {
+        await cargarInventario(sedeActual)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo eliminar el producto")
+    } finally {
+      setIsDeletingProduct(false)
+    }
+  }
+
+  const abrirTraslado = (producto: InventarioProducto) => {
+    setProductoTrasladando(producto)
+    setTrasladoSedeDestino("")
+    setTrasladoCantidad("")
+    setTrasladoError(null)
+  }
+
+  const confirmarTraslado = async () => {
+    const token = resolveToken()
+    if (!token || !productoTrasladando) return
+    const sedeOrigen = productoTrasladando.sede_id
+    if (!sedeOrigen) {
+      setTrasladoError("No se pudo determinar la sede origen de este producto")
+      return
+    }
+    if (!trasladoSedeDestino) {
+      setTrasladoError("Selecciona la sede destino")
+      return
+    }
+    if (trasladoSedeDestino === sedeOrigen) {
+      setTrasladoError("La sede destino debe ser distinta de la sede origen")
+      return
+    }
+    const cantidad = Number(trasladoCantidad)
+    if (!trasladoCantidad || !Number.isFinite(cantidad) || cantidad <= 0) {
+      setTrasladoError("Ingresa una cantidad válida")
+      return
+    }
+    if (cantidad > (productoTrasladando.stock_actual ?? 0)) {
+      setTrasladoError(`Stock insuficiente (disponible: ${productoTrasladando.stock_actual ?? 0})`)
+      return
+    }
+
+    setIsTrasladando(true)
+    setTrasladoError(null)
+    try {
+      const result = await crearTraslado(token, {
+        sede_origen: sedeOrigen,
+        sede_destino: trasladoSedeDestino,
+        items: [{ producto_id: productoTrasladando.producto_id, cantidad }],
+      })
+      const sedeDestinoNombre =
+        sedesDisponibles.find((s) => s.sede_id === result.sede_destino)?.nombre || result.sede_destino
+      setSuccessMessage(`Se trasladaron ${cantidad} u. de "${productoTrasladando.producto_nombre}" a ${sedeDestinoNombre}`)
+      setProductoTrasladando(null)
+      const sedeActual = resolveSedeId(selectedDashboardSede)
+      if (sedeActual) {
+        await cargarInventario(sedeActual)
+      }
+    } catch (err) {
+      setTrasladoError(err instanceof Error ? err.message : "No se pudo trasladar el stock")
+    } finally {
+      setIsTrasladando(false)
+    }
   }
 
   return (
@@ -1385,8 +1592,21 @@ export function ProductsList() {
                                     </button>
                                   </DropdownMenuTrigger>
                                   <DropdownMenuContent align="end" className="bg-white">
-                                    <DropdownMenuItem onSelect={() => openEditModal(producto.producto_id || producto._id)}>
+                                    <DropdownMenuItem
+                                      onSelect={() => openEditModal(producto.producto_id || producto._id)}
+                                      disabled={isLoadingDeleteTarget === (producto.producto_id || producto._id)}
+                                    >
                                       Editar producto
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                      onSelect={() => void abrirEliminarProducto(producto.producto_id || producto._id)}
+                                      disabled={isLoadingDeleteTarget === (producto.producto_id || producto._id)}
+                                      className="text-red-600 focus:text-red-600"
+                                    >
+                                      Eliminar producto
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem onSelect={() => abrirTraslado(producto)}>
+                                      <ArrowRightLeft className="mr-2 h-4 w-4" /> Trasladar a otra sede
                                     </DropdownMenuItem>
                                   </DropdownMenuContent>
                                 </DropdownMenu>
@@ -1634,7 +1854,7 @@ export function ProductsList() {
               </Button>
               <Button
                 className="bg-gray-900 text-white hover:bg-gray-800 text-sm"
-                onClick={() => { setCreacionModo("manual"); void crearInventarioDesdeCard() }}
+                onClick={() => void crearProductoNuevoDesdeCard()}
                 disabled={isCreatingInventario}
               >
                 {isCreatingInventario && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -1900,6 +2120,10 @@ export function ProductsList() {
           <DialogContent className="sm:max-w-md bg-white border-gray-200">
             <DialogHeader>
               <DialogTitle>Editar producto</DialogTitle>
+              <DialogDescription>
+                Cambia el nombre o el precio de este producto en el catálogo maestro. Afecta a todas las
+                sedes que lo tengan asignado.
+              </DialogDescription>
             </DialogHeader>
             <div className="space-y-3">
               <div>
@@ -1907,40 +2131,107 @@ export function ProductsList() {
                 <Input
                   value={editingName}
                   onChange={(e) => setEditingName(e.target.value)}
-                  disabled={editingLoading}
+                  disabled={editingLoading || editingSaving}
                   className="mt-1"
                 />
               </div>
               <div>
-                <label className="text-sm text-gray-700">Precio</label>
+                <label className="text-sm text-gray-700">Precio ({(ventasCurrency || "COP").toUpperCase()})</label>
                 <Input
                   type="number"
                   min="0"
                   value={editingPrice}
                   onChange={(e) => setEditingPrice(e.target.value)}
-                  disabled={editingLoading}
-                  className="mt-1"
-                />
-                <p className="text-xs text-gray-500 mt-1">Edición local en UI; no guarda en backend.</p>
-              </div>
-              <div>
-                <label className="text-sm text-gray-700">Stock</label>
-                <Input
-                  type="number"
-                  min="0"
-                  value={editingStock}
-                  onChange={(e) => setEditingStock(e.target.value)}
-                  disabled={editingLoading}
+                  disabled={editingLoading || editingSaving}
                   className="mt-1"
                 />
               </div>
+              {editingError && <p className="text-xs text-red-600">{editingError}</p>}
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setEditingProductId(null)} disabled={editingLoading}>
+              <Button variant="outline" onClick={() => setEditingProductId(null)} disabled={editingSaving}>
                 Cancelar
               </Button>
-              <Button onClick={handleSaveEdit} disabled={editingLoading}>
+              <Button onClick={() => void handleSaveEdit()} disabled={editingLoading || editingSaving}>
+                {editingSaving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Guardar cambios
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={Boolean(deletingProduct)} onOpenChange={(open) => !open && setDeletingProduct(null)}>
+          <DialogContent className="sm:max-w-md bg-white border-gray-200">
+            <DialogHeader>
+              <DialogTitle>Eliminar producto</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-gray-600">
+              ¿Eliminar <strong>"{deletingProduct?.nombre}"</strong> del catálogo maestro? Esta acción no se
+              puede deshacer y afecta a todas las sedes.
+            </p>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setDeletingProduct(null)} disabled={isDeletingProduct}>
+                Cancelar
+              </Button>
+              <Button
+                className="bg-red-600 text-white hover:bg-red-700"
+                onClick={() => void confirmarEliminarProducto()}
+                disabled={isDeletingProduct}
+              >
+                {isDeletingProduct && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Eliminar
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={Boolean(productoTrasladando)}
+          onOpenChange={(open) => { if (!open) setProductoTrasladando(null) }}
+        >
+          <DialogContent className="sm:max-w-md bg-white border-gray-200">
+            <DialogHeader>
+              <DialogTitle>Trasladar a otra sede</DialogTitle>
+              <DialogDescription>
+                {productoTrasladando?.producto_nombre} — stock en {productoTrasladando?.sede_id}: {productoTrasladando?.stock_actual ?? 0}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div>
+                <label className="text-sm text-gray-700">Sede destino</label>
+                <Select value={trasladoSedeDestino} onValueChange={setTrasladoSedeDestino}>
+                  <SelectTrigger className="mt-1 border-gray-200 bg-white text-sm">
+                    <SelectValue placeholder="Selecciona la sede destino" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-white border-gray-200">
+                    {sedesDisponibles
+                      .filter((s) => s.sede_id !== productoTrasladando?.sede_id)
+                      .map((s) => (
+                        <SelectItem key={s.sede_id} value={s.sede_id}>{s.nombre}</SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <label className="text-sm text-gray-700">Cantidad a trasladar</label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={productoTrasladando?.stock_actual ?? undefined}
+                  value={trasladoCantidad}
+                  onChange={(e) => setTrasladoCantidad(e.target.value)}
+                  className="mt-1"
+                />
+              </div>
+              {trasladoError && <p className="text-xs text-red-600">{trasladoError}</p>}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setProductoTrasladando(null)} disabled={isTrasladando}>
+                Cancelar
+              </Button>
+              <Button onClick={() => void confirmarTraslado()} disabled={isTrasladando}>
+                {isTrasladando && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Trasladar
               </Button>
             </DialogFooter>
           </DialogContent>

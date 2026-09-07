@@ -158,7 +158,7 @@ export function ServiceCommissionsModal({
       >
         <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
           <h3 className="text-lg font-semibold">
-            Editando comisiones para {stylistName || "estilista"}
+            Editando comisiones para {stylistName || "profesional"}
           </h3>
           <button
             type="button"

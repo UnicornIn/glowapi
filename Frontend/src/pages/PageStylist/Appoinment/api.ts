@@ -418,7 +418,7 @@ export const estilistaApi = {
       const estilista = estilistas.find(est => est.email === email);
       
       if (!estilista) {
-        throw new Error('Estilista no encontrado');
+        throw new Error('Profesional no encontrado');
       }
 
       let sede = null;

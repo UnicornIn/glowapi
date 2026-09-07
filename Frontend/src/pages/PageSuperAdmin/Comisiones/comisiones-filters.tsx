@@ -274,11 +274,11 @@ export function ComisionesFilters({ onFiltersChange }: ComisionesFiltersProps) {
           disabled={!selectedSede || cargandoEstilistas}
         >
           <SelectTrigger className="w-full bg-white border-gray-300">
-            <SelectValue placeholder="Selecciona un estilista" />
+            <SelectValue placeholder="Selecciona un profesional" />
           </SelectTrigger>
           <SelectContent className="bg-white border-gray-300 max-h-60">
             <SelectItem value="placeholder" disabled>
-              -- Selecciona un estilista --
+              -- Selecciona un profesional --
             </SelectItem>
             {estilistas.map((e) => (
               <SelectItem

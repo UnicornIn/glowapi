@@ -612,10 +612,11 @@ export function VentasFacturadasList() {
 
       {/* Detail Modal */}
       {selectedFactura && (
-        <FacturaDetailModal 
-          factura={selectedFactura} 
-          open={isModalOpen} 
-          onOpenChange={setIsModalOpen} 
+        <FacturaDetailModal
+          factura={selectedFactura}
+          open={isModalOpen}
+          onOpenChange={setIsModalOpen}
+          onAnulada={() => cargarFacturas(currentPage, appliedFilters)}
         />
       )}
     </>

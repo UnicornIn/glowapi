@@ -1,24 +1,25 @@
 import { API_BASE_URL } from "../../../types/config";
-import { Service } from "../../../types/service";
+import { Service, PaqueteSesionesOpcion } from "../../../types/service";
+import { getStoredCurrency } from "../../../lib/currency";
 
 export interface CreateServiceData {
   nombre: string;
   duracion_minutos: number;
   precio: number;
-  comision_estilista?: number | null;
   categoria?: string;
   requiere_producto?: boolean;
   activo?: boolean;
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
 }
 
 export interface UpdateServiceData {
   nombre?: string;
   duracion_minutos?: number;
   precio?: number;
-  comision_estilista?: number | null;
   categoria?: string;
   requiere_producto?: boolean;
   activo?: boolean;
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
 }
 
 export interface ServiceResponse {
@@ -26,17 +27,29 @@ export interface ServiceResponse {
   servicio_id: string;
   nombre: string;
   duracion_minutos: number;
-  precio: number;
-  comision_estilista?: number | null;
+  precios: Record<string, number>;
   categoria?: string;
   requiere_producto: boolean;
   activo: boolean;
   creado_por?: string;
   created_at?: string;
   updated_at?: string;
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
 }
 
 export const serviciosService = {
+  async obtenerServicioPorId(token: string, servicioId: string): Promise<ServiceResponse | null> {
+    const response = await fetch(`${API_BASE_URL}admin/servicios/${servicioId}`, {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  },
+
   async getServicios(token: string): Promise<Service[]> {
     const response = await fetch(`${API_BASE_URL}admin/servicios/`, {
       method: 'GET',
@@ -51,33 +64,44 @@ export const serviciosService = {
     }
 
     const data: ServiceResponse[] = await response.json();
-    
-    // Transformar la respuesta del backend al formato del frontend
-    return data.map(servicio => ({
-      id: servicio.servicio_id,
-      nombre: servicio.nombre,
-      descripcion: servicio.categoria || 'Sin descripción', // Usar categoría como descripción
-      precio: servicio.precio,
-      duracion: servicio.duracion_minutos,
-      categoria: servicio.categoria || 'General',
-      activo: servicio.activo,
-      comision_porcentaje: servicio.comision_estilista || 0,
-      imagen: this.getDefaultImage(servicio.categoria),
-      // Campos adicionales para compatibilidad
-      servicio_id: servicio.servicio_id,
-      requiere_producto: servicio.requiere_producto
-    }));
+    const moneda = getStoredCurrency('USD');
+
+    // Transformar la respuesta del backend al formato del frontend.
+    // El backend siempre devuelve `precios` (mapa por moneda) — nunca un
+    // `precio` plano — así que hay que resolver cuál mostrar según la
+    // moneda real de la sede, con el primer valor disponible como fallback
+    // para no mostrar $0 si esa moneda puntual no está en el mapa.
+    return data.map(servicio => {
+      const precios = servicio.precios || {};
+      const precio = precios[moneda] ?? Object.values(precios)[0] ?? 0;
+      return {
+        id: servicio.servicio_id,
+        nombre: servicio.nombre,
+        descripcion: servicio.categoria || 'Sin descripción', // Usar categoría como descripción
+        precio,
+        duracion: servicio.duracion_minutos,
+        categoria: servicio.categoria || 'General',
+        activo: servicio.activo,
+        comision_porcentaje: 0,
+        imagen: this.getDefaultImage(servicio.categoria),
+        // Campos adicionales para compatibilidad
+        servicio_id: servicio.servicio_id,
+        requiere_producto: servicio.requiere_producto,
+        paquetes_sesiones: servicio.paquetes_sesiones
+      };
+    });
   },
 
   async createServicio(token: string, servicio: CreateServiceData): Promise<ServiceResponse> {
     const requestData = {
       nombre: servicio.nombre.trim(),
       duracion_minutos: servicio.duracion_minutos,
-      precio: servicio.precio,
-      comision_estilista: servicio.comision_estilista,
+      // El backend exige `precios` (mapa por moneda), no un `precio` plano.
+      precios: { [getStoredCurrency('USD')]: servicio.precio },
       categoria: servicio.categoria?.trim() || 'General',
       requiere_producto: servicio.requiere_producto || false,
-      activo: servicio.activo !== undefined ? servicio.activo : true
+      activo: servicio.activo !== undefined ? servicio.activo : true,
+      paquetes_sesiones: servicio.paquetes_sesiones
     };
 
     console.log('📤 Creando servicio con datos:', requestData);
@@ -124,15 +148,27 @@ export const serviciosService = {
     const requestData: any = {
       nombre: servicio.nombre?.trim(),
       duracion_minutos: servicio.duracion_minutos,
-      precio: servicio.precio,
       categoria: servicio.categoria?.trim(),
       requiere_producto: servicio.requiere_producto,
-      activo: servicio.activo
+      activo: servicio.activo,
+      paquetes_sesiones: servicio.paquetes_sesiones
     };
 
-    // Solo enviar comision si tiene valor
-    if (servicio.comision_estilista !== undefined && servicio.comision_estilista !== null) {
-      requestData.comision_estilista = servicio.comision_estilista;
+    // El backend requiere `precios` (mapa por moneda) — un `precio` plano
+    // causa 422 (campo faltante). El backend hace `$set` sobre el mapa
+    // completo, así que si solo mandáramos la moneda editada se perderían
+    // las demás monedas ya cargadas para este servicio (ej. USD global +
+    // BOB local) — por eso primero se trae el mapa actual y se fusiona.
+    if (servicio.precio !== undefined && servicio.precio !== null) {
+      let preciosActuales: Record<string, number> = {};
+      try {
+        const actual = await this.obtenerServicioPorId(token, servicioId);
+        preciosActuales = actual?.precios || {};
+      } catch {
+        // Si no se puede leer el servicio actual, se sigue con el mapa vacío
+        // — peor caso: se pierden otras monedas, pero al menos no falla el 422.
+      }
+      requestData.precios = { ...preciosActuales, [getStoredCurrency('USD')]: servicio.precio };
     }
 
     console.log('📤 Actualizando servicio:', requestData);

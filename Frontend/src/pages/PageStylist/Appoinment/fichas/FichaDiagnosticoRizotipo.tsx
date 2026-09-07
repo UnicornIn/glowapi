@@ -905,7 +905,7 @@ export function FichaDiagnosticoRizotipo({ cita, datosIniciales, onGuardar, onSu
       {/* Tipo de Textura */}
       <div className="space-y-3">
         <label className="block text-sm font-medium">Tipo de Textura *</label>
-        <p className="text-xs text-gray-500">El estilista selecciona y aparece la imagen de referencia correspondiente</p>
+        <p className="text-xs text-gray-500">El profesional selecciona y aparece la imagen de referencia correspondiente</p>
 
         {/* Ondulados 2 */}
         <div>

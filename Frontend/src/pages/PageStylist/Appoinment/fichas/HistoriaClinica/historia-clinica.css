@@ -1,0 +1,577 @@
+/* ════════════════════════════════════════════════════════════
+   Historia Clínica — Design System
+   Alineado a glowup-clients.css (tokens --glw-*), tipografía y
+   radios del resto de la app. Prefijo: hc-
+   ════════════════════════════════════════════════════════════ */
+
+.hc-root {
+  --hc-ink: var(--glw-ink, #111111);
+  --hc-ink-2: var(--glw-ink-2, #3d3d3d);
+  --hc-ink-3: var(--glw-ink-3, #717171);
+  --hc-ink-4: var(--glw-ink-4, #aaaaaa);
+  --hc-border: var(--glw-border, #e8e8e8);
+  --hc-border-2: var(--glw-border-2, #f2f2f2);
+  --hc-bg: var(--glw-bg, #ffffff);
+  --hc-bg-2: var(--glw-bg-2, #f9f9f9);
+  --hc-bg-3: var(--glw-bg-3, #f2f2f2);
+  --hc-r: var(--glw-r, 7px);
+  --hc-ok: #1d9c50;
+  --hc-ok-bg: #edf7f1;
+
+  font-family: var(--font-family, ui-sans-serif, system-ui, sans-serif);
+  color: var(--hc-ink);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  background: var(--hc-bg);
+  border: 1px solid var(--hc-border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  container-name: hc;
+}
+
+/* El bottom sheet del protocolo de atención es estrecho por defecto (pensado
+   para fichas cortas). Una historia clínica necesita mucho más ancho, así que
+   ensancha el panel que la contiene. */
+[data-bottom-sheet-panel]:has(.hc-root) {
+  max-width: min(1180px, calc(100vw - 2rem));
+}
+
+/* ── Topbar ─────────────────────────────────────────────── */
+.hc-topbar {
+  background: var(--hc-bg-2);
+  border-bottom: 1px solid var(--hc-border);
+  padding: 15px 20px;
+  flex-shrink: 0;
+  border-radius: 10px 10px 0 0;
+}
+.hc-topbar-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.hc-title {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hc-sub {
+  font-size: 12px;
+  color: var(--hc-ink-3);
+  margin-top: 3px;
+}
+.hc-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── Botones ────────────────────────────────────────────── */
+.hc-btn {
+  padding: 7px 14px;
+  border-radius: var(--hc-r);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  border: 1px solid var(--hc-border);
+  background: var(--hc-bg);
+  color: var(--hc-ink);
+  font-weight: 500;
+  transition: all 0.12s;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.hc-btn:hover {
+  background: var(--hc-bg-2);
+}
+.hc-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.hc-btn-primary {
+  background: var(--hc-ink);
+  color: #fff;
+  border-color: var(--hc-ink);
+}
+.hc-btn-primary:hover {
+  background: #2a2a2a;
+}
+.hc-btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+/* ── Layout cuerpo (rail + contenido) ───────────────────── */
+.hc-body {
+  flex: 1;
+  padding: 18px 20px;
+  max-width: 1400px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* ── Contenido ──────────────────────────────────────────── */
+.hc-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* ── Sección ────────────────────────────────────────────── */
+.hc-section {
+  border: 1px solid var(--hc-border);
+  border-radius: 10px;
+  background: var(--hc-bg);
+  scroll-margin-top: 16px;
+}
+.hc-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--hc-bg-2);
+  border-bottom: 1px solid var(--hc-border);
+  border-radius: 9px 9px 0 0;
+}
+.hc-num {
+  flex-shrink: 0;
+  width: 21px;
+  height: 21px;
+  border-radius: 6px;
+  background: var(--hc-ink);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+}
+.hc-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.15px;
+  text-transform: uppercase;
+  margin: 0;
+}
+.hc-section-note {
+  font-size: 11px;
+  color: var(--hc-ink-3);
+  margin-left: auto;
+  text-align: right;
+}
+.hc-section-body {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* ── Subtítulo de bloque (ej. "Inspección estática") ────── */
+.hc-subhead {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--hc-ink-4);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.hc-subhead::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--hc-border-2);
+}
+
+/* ── Grupo con recuadro (ej. "Antecedentes", "Abdomen") ── */
+.hc-group {
+  border: 1px solid var(--hc-border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--hc-bg);
+}
+.hc-group-label {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--hc-ink-2);
+  border: 1px solid var(--hc-border);
+  border-radius: 5px;
+  padding: 3px 8px;
+  margin-bottom: 13px;
+  background: var(--hc-bg-2);
+}
+
+/* ── Grids de campos ────────────────────────────────────── */
+.hc-grid {
+  display: grid;
+  gap: 13px 16px;
+}
+.hc-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.hc-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.hc-grid-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.hc-col-2 {
+  grid-column: span 2;
+}
+.hc-col-full {
+  grid-column: 1 / -1;
+}
+
+/* ── Campo ──────────────────────────────────────────────── */
+.hc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.hc-field-label {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--hc-ink-3);
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+}
+.hc-field-hint {
+  font-size: 10.5px;
+  color: var(--hc-ink-4);
+}
+
+.hc-input,
+.hc-select,
+.hc-textarea {
+  width: 100%;
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-r);
+  background: var(--hc-bg);
+  color: var(--hc-ink);
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color 0.12s, background 0.12s;
+}
+.hc-input::placeholder,
+.hc-textarea::placeholder {
+  color: var(--hc-ink-4);
+}
+.hc-input:focus,
+.hc-select:focus,
+.hc-textarea:focus {
+  border-color: var(--hc-ink-3);
+  background: var(--hc-bg);
+}
+.hc-input:hover,
+.hc-select:hover {
+  border-color: #d4d4d4;
+}
+
+.hc-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23717171' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+.hc-select[data-empty="true"] {
+  color: var(--hc-ink-4);
+}
+
+.hc-textarea {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.55;
+}
+.hc-textarea-lg {
+  min-height: 130px;
+}
+
+/* ── Segmentado Sí / No ─────────────────────────────────── */
+.hc-seg {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--hc-border);
+  border-radius: var(--hc-r);
+  background: var(--hc-bg-2);
+  width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+.hc-seg-btn {
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--hc-ink-3);
+  padding: 4px 13px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.12s;
+  white-space: nowrap;
+}
+.hc-seg-btn:hover {
+  color: var(--hc-ink);
+}
+.hc-seg-btn.active {
+  background: var(--hc-bg);
+  color: var(--hc-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.hc-seg-btn.active[data-tone="yes"] {
+  background: var(--hc-ok-bg);
+  color: #1d7a45;
+}
+.hc-seg-btn.active[data-tone="no"] {
+  background: var(--hc-bg-3);
+  color: var(--hc-ink-2);
+}
+
+/* ── Escala numérica (dolor 1-10, fuerza 1-5) ───────────── */
+.hc-scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.hc-scale-btn {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 5px;
+  border: 1px solid var(--hc-border);
+  border-radius: 6px;
+  background: var(--hc-bg);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--hc-ink-3);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.hc-scale-btn:hover {
+  background: var(--hc-bg-2);
+  color: var(--hc-ink);
+}
+.hc-scale-btn.active {
+  background: var(--hc-ink);
+  border-color: var(--hc-ink);
+  color: #fff;
+}
+.hc-scale-legend {
+  font-size: 10.5px;
+  color: var(--hc-ink-4);
+  margin-left: 6px;
+}
+
+/* ── Checkboxes tipo chip ───────────────────────────────── */
+.hc-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.hc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid var(--hc-border);
+  border-radius: 20px;
+  background: var(--hc-bg);
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--hc-ink-3);
+  cursor: pointer;
+  transition: all 0.12s;
+  user-select: none;
+}
+.hc-check:hover {
+  background: var(--hc-bg-2);
+  color: var(--hc-ink);
+}
+.hc-check.active {
+  background: var(--hc-ink);
+  border-color: var(--hc-ink);
+  color: #fff;
+  font-weight: 500;
+}
+.hc-check-box {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1.5px solid var(--hc-ink-4);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.hc-check.active .hc-check-box {
+  border-color: #fff;
+  background: #fff;
+}
+.hc-check.active .hc-check-box::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--hc-ink);
+}
+
+/* ── Evoluciones ────────────────────────────────────────── */
+.hc-evo {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hc-evo-entry {
+  border: 1px solid var(--hc-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.hc-evo-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 13px;
+  background: var(--hc-bg-2);
+  border-bottom: 1px solid var(--hc-border-2);
+  flex-wrap: wrap;
+}
+.hc-evo-date {
+  font-size: 12px;
+  font-weight: 600;
+}
+.hc-evo-prof {
+  font-size: 11px;
+  color: var(--hc-ink-3);
+}
+.hc-evo-sesion {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--hc-ink-4);
+}
+.hc-evo-body {
+  padding: 11px 13px;
+  font-size: 12px;
+  color: var(--hc-ink-2);
+  line-height: 1.55;
+}
+.hc-evo-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--hc-ink-4);
+  font-size: 12px;
+  border: 1px dashed var(--hc-border);
+  border-radius: 8px;
+}
+
+/* ── Barra de acciones inferior ─────────────────────────── */
+.hc-footbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  background: var(--hc-bg-2);
+  border-top: 1px solid var(--hc-border);
+  border-radius: 0 0 10px 10px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.hc-footbar-info {
+  margin-right: auto;
+  font-size: 11.5px;
+  color: var(--hc-ink-3);
+}
+
+/* ── Utilidades ─────────────────────────────────────────── */
+.hc-note {
+  border: 1px dashed var(--hc-border);
+  border-radius: 8px;
+  padding: 11px 13px;
+  font-size: 11.5px;
+  color: var(--hc-ink-3);
+  line-height: 1.55;
+  background: var(--hc-bg-2);
+}
+.hc-json {
+  margin: 0;
+  padding: 14px;
+  background: #111;
+  color: #e8e8e8;
+  border-radius: 8px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  max-height: 460px;
+  overflow: auto;
+}
+
+/* ── Responsive (por ancho del contenedor, no del viewport) ── */
+@container hc (max-width: 940px) {
+  .hc-grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hc-grid-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container hc (max-width: 620px) {
+  .hc-topbar {
+    padding: 13px 14px;
+  }
+  .hc-body {
+    padding: 14px;
+  }
+  .hc-footbar {
+    padding: 10px 14px;
+  }
+  .hc-grid-2,
+  .hc-grid-3,
+  .hc-grid-4 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hc-col-2,
+  .hc-col-full {
+    grid-column: auto;
+  }
+  .hc-title {
+    font-size: 18px;
+  }
+  .hc-section-body {
+    padding: 13px;
+  }
+  .hc-section-note {
+    display: none;
+  }
+}

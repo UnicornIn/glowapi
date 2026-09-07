@@ -1189,6 +1189,9 @@ export function VentasFacturadasList() {
           factura={selectedFactura}
           open={isModalOpen}
           onOpenChange={setIsModalOpen}
+          onAnulada={() =>
+            activeFilters && void cargarFacturas(currentPage, activeFilters)
+          }
         />
       )}
     </>

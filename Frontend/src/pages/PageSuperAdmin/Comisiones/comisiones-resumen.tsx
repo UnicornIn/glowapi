@@ -49,7 +49,7 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
     // Si no hay profesional_id, no hacer nada
     if (!filters.profesional_id || !isMountedRef.current) {
       setSummary(null);
-      setError("Debes seleccionar un estilista para ver sus comisiones");
+      setError("Debes seleccionar un profesional para ver sus comisiones");
       return;
     }
 
@@ -83,7 +83,7 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
       console.log("📋 Comisiones obtenidas:", comisiones);
 
       if (comisiones.length === 0) {
-        setError(`No se encontraron comisiones pendientes para el estilista seleccionado en el rango de fechas especificado.`);
+        setError(`No se encontraron comisiones pendientes para el profesional seleccionado en el rango de fechas especificado.`);
         return;
       }
 
@@ -169,10 +169,10 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
           <User className="h-8 w-8 text-gray-700" />
         </div>
         <h3 className="mb-2 text-lg font-medium text-gray-900">
-          Selecciona un estilista
+          Selecciona un profesional
         </h3>
         <p className="text-gray-700">
-          Usa los filtros arriba para seleccionar un estilista y ver sus comisiones pendientes.
+          Usa los filtros arriba para seleccionar un profesional y ver sus comisiones pendientes.
         </p>
       </div>
     );
@@ -216,7 +216,7 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
           No se encontraron comisiones
         </h3>
         <p className="text-gray-700">
-          No hay comisiones pendientes para el estilista y rango de fechas seleccionado.
+          No hay comisiones pendientes para el profesional y rango de fechas seleccionado.
         </p>
         <div className="mt-4">
           <button
@@ -253,8 +253,8 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
               <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr] gap-4 bg-gray-100 p-4 text-sm font-semibold text-gray-900">
                 <div>Servicio</div>
                 <div className="text-right">Precio</div>
-                <div className="text-right">% Estilista</div>
-                <div className="text-right">Comisión Estilista</div>
+                <div className="text-right">% Profesional</div>
+                <div className="text-right">Comisión Profesional</div>
                 <div className="text-right">Comisión Casa</div>
               </div>
 
@@ -290,8 +290,8 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
               <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr] gap-4 bg-gray-100 p-4 text-sm font-semibold text-gray-900">
                 <div>Producto</div>
                 <div className="text-right">Precio</div>
-                <div className="text-right">% Estilista</div>
-                <div className="text-right">Comisión Estilista</div>
+                <div className="text-right">% Profesional</div>
+                <div className="text-right">Comisión Profesional</div>
                 <div className="text-right">Comisión Casa</div>
               </div>
 
@@ -344,7 +344,7 @@ export function ComisionesResumen({ filters = {} }: ComisionesResumenProps) {
           </div>
 
           <div className="mb-4 flex items-baseline justify-between">
-            <span className="text-sm font-medium text-gray-700">Comisión Total Estilista</span>
+            <span className="text-sm font-medium text-gray-700">Comisión Total Profesional</span>
             <span className="text-2xl font-bold text-gray-900">
               {formatMoneda(totales.totalComisionEstilista, moneda)}
             </span>

@@ -1,32 +1,24 @@
 import { API_BASE_URL } from "../../../types/config";
-import { Service } from "../../../types/service";
+import { Service, PaqueteSesionesOpcion } from "../../../types/service";
 
 export interface CreateServiceData {
   nombre: string;
   duracion_minutos: number;
-  precios: {
-    USD: number;
-    COP: number;
-    MXN?: number;
-  };
-  comision_estilista?: number | null;
+  precios: Record<string, number>;
   categoria?: string;
   requiere_producto?: boolean;
   activo?: boolean;
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
 }
 
 export interface UpdateServiceData {
   nombre?: string;
   duracion_minutos?: number;
-  precios?: {
-    USD: number;
-    COP: number;
-    MXN?: number;
-  };
-  comision_estilista?: number | null;
+  precios?: Record<string, number>;
   categoria?: string;
   requiere_producto?: boolean;
   activo?: boolean;
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
 }
 
 export interface ServiceResponse {
@@ -34,34 +26,38 @@ export interface ServiceResponse {
   servicio_id: string;
   nombre: string;
   duracion_minutos: number;
-  precios: {
-    USD: number;
-    COP: number;
-    MXN?: number;
-  };
-  comision_estilista?: number | null;
+  precios: Record<string, number>;
   categoria?: string;
   requiere_producto: boolean;
   activo: boolean;
   creado_por?: string;
   created_at?: string;
   updated_at?: string;
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
 }
 
 // 🔥 ACTUALIZADO: Extender el tipo Service para incluir campos adicionales
 export interface ServiceWithCurrency extends Service {
   precio_local?: number;
   moneda_local?: string;
-  precios_completos?: {
-    USD: number;
-    COP: number;
-    MXN?: number;
-  };
+  precios_completos?: Record<string, number>;
   servicio_id?: string;
   requiere_producto?: boolean;
 }
 
 export const serviciosService = {
+  async obtenerServicioPorId(token: string, servicioId: string): Promise<ServiceResponse | null> {
+    const response = await fetch(`${API_BASE_URL}admin/servicios/${servicioId}`, {
+      method: 'GET',
+      headers: {
+        'accept': 'application/json',
+        'Authorization': `Bearer ${token}`
+      }
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  },
+
   async getServicios(token: string, moneda?: string): Promise<ServiceWithCurrency[]> {
     const url = moneda 
       ? `${API_BASE_URL}admin/servicios/?moneda=${moneda}`
@@ -87,21 +83,17 @@ export const serviciosService = {
       let precioAMostrar = servicio.precio;
       let precioLocal = servicio.precio_local;
       let monedaLocal = servicio.moneda_local || moneda || 'USD';
-      
+
       if (servicio.precio_local !== undefined) {
         precioAMostrar = servicio.precio_local;
-      } 
+      }
       else if (servicio.precios) {
-        if (moneda === 'COP' && servicio.precios.COP) {
-          precioAMostrar = servicio.precios.COP;
-          monedaLocal = 'COP';
-        } else if (moneda === 'MXN' && servicio.precios.MXN) {
-          precioAMostrar = servicio.precios.MXN;
-          monedaLocal = 'MXN';
-        } else {
-          precioAMostrar = servicio.precios.USD;
-          monedaLocal = 'USD';
-        }
+        // Busca la moneda real de la sede en el mapa (soporta cualquier
+        // moneda, no solo COP/MXN/USD) — con el primer valor disponible
+        // como fallback si esa moneda puntual no está cargada.
+        const precioEnMoneda = moneda ? servicio.precios[moneda] : undefined;
+        precioAMostrar = precioEnMoneda ?? Object.values(servicio.precios)[0];
+        monedaLocal = precioEnMoneda !== undefined ? moneda! : Object.keys(servicio.precios)[0] || 'USD';
       }
 
       const servicioConMoneda: ServiceWithCurrency = {
@@ -118,7 +110,8 @@ export const serviciosService = {
         imagen: this.getDefaultImage(servicio.categoria),
         servicio_id: servicio.servicio_id || servicio._id,
         requiere_producto: servicio.requiere_producto,
-        precios_completos: servicio.precios // 🔥 Asegurar que existe
+        precios_completos: servicio.precios, // 🔥 Asegurar que existe
+        paquetes_sesiones: servicio.paquetes_sesiones
       };
 
       return servicioConMoneda;
@@ -130,10 +123,10 @@ export const serviciosService = {
       nombre: servicio.nombre.trim(),
       duracion_minutos: servicio.duracion_minutos,
       precios: servicio.precios,
-      comision_estilista: servicio.comision_estilista,
       categoria: servicio.categoria?.trim() || 'General',
       requiere_producto: servicio.requiere_producto || false,
-      activo: servicio.activo !== undefined ? servicio.activo : true
+      activo: servicio.activo !== undefined ? servicio.activo : true,
+      paquetes_sesiones: servicio.paquetes_sesiones
     };
 
     console.log('📤 Creando servicio con datos:', requestData);
@@ -182,15 +175,12 @@ export const serviciosService = {
       duracion_minutos: servicio.duracion_minutos,
       categoria: servicio.categoria?.trim(),
       requiere_producto: servicio.requiere_producto,
-      activo: servicio.activo
+      activo: servicio.activo,
+      paquetes_sesiones: servicio.paquetes_sesiones
     };
 
     if (servicio.precios) {
       requestData.precios = servicio.precios;
-    }
-
-    if (servicio.comision_estilista !== undefined && servicio.comision_estilista !== null) {
-      requestData.comision_estilista = servicio.comision_estilista;
     }
 
     console.log('📤 Actualizando servicio:', requestData);

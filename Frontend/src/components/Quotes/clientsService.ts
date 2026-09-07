@@ -333,6 +333,43 @@ export async function agregarNotaCliente(token: string, clienteId: string, nota:
   }
 }
 
+// Paquete de sesiones prepagas (ej. "5 sesiones de Terapia individual piso
+// pélvico") que el cliente compró — lo crea automáticamente el backend al
+// facturar una cita que compra un paquete. Usado en "Nueva Cita" para
+// ofrecer "usar sesión del paquete" cuando el servicio elegido tiene saldo
+// disponible.
+export interface PaqueteCliente {
+  paquete_id: string;
+  cliente_id: string;
+  servicio_id: string;
+  nombre_servicio: string;
+  sesiones_totales: number;
+  sesiones_usadas: number;
+  sesiones_restantes: number;
+  valor_por_sesion: number;
+  moneda: string;
+  activo: boolean;
+}
+
+export async function getPaquetesCliente(token: string, clienteId: string): Promise<PaqueteCliente[]> {
+  try {
+    const res = await fetch(`${API_BASE_URL}clientes/${clienteId}/paquetes`, {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      credentials: "include",
+    });
+
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.error('❌ Error cargando paquetes del cliente:', error);
+    return [];
+  }
+}
+
 // 🔥 OBTENER HISTORIAL DE CLIENTE
 export async function getHistorialCliente(token: string, clienteId: string): Promise<any[]> {
   try {

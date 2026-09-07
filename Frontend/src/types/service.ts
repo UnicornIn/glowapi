@@ -14,4 +14,12 @@ export interface Service {
   creado_por?: string;
   created_at?: string;
   updated_at?: string;
+  // Paquetes de sesiones prepagas de este mismo servicio (ej. "5 sesiones
+  // por 750.000") — opciones de precio/cantidad, no un servicio aparte.
+  paquetes_sesiones?: PaqueteSesionesOpcion[];
+}
+
+export interface PaqueteSesionesOpcion {
+  sesiones: number;
+  precio: number;
 }

@@ -206,7 +206,7 @@ export default function StylistReportsPage() {
   const [invoices, setInvoices] = useState<FacturaConverted[]>([]);
   const [professionalId, setProfessionalId] = useState<string>("");
   const [stylistName, setStylistName] = useState<string>(
-    user?.name || "Estilista",
+    user?.name || "Profesional",
   );
   const [stylistSubtitle, setStylistSubtitle] =
     useState<string>("Especialista");
@@ -236,7 +236,7 @@ export default function StylistReportsPage() {
       }
 
       if (!user?.email || !user?.access_token) {
-        setStylistName(user?.name || "Estilista");
+        setStylistName(user?.name || "Profesional");
         return;
       }
 
@@ -266,7 +266,7 @@ export default function StylistReportsPage() {
         }
       } catch (profileError) {
         console.warn("No se pudo cargar perfil de estilista:", profileError);
-        setStylistName(user?.name || "Estilista");
+        setStylistName(user?.name || "Profesional");
       }
     };
 

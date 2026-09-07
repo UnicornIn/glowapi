@@ -304,6 +304,79 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
         story.append(Paragraph(v, st["body"]))
         story.append(Spacer(1, 3))
 
+    CAMPOS_TECNICOS_OCULTOS = {
+        "cita_id", "firma_profesional", "fecha_firma",
+        "profesional_firmante_id", "profesional_firmante_email",
+    }
+
+    def _es_vacio(v):
+        if v is None:
+            return True
+        if isinstance(v, str) and not v.strip():
+            return True
+        if isinstance(v, (list, dict)) and len(v) == 0:
+            return True
+        return False
+
+    def _texto_simple(v):
+        if isinstance(v, bool):
+            return "Sí" if v else "No"
+        return str(v)
+
+    def bloque_recursivo(titulo: str, valor, nivel: int = 0):
+        """
+        Igual que `bloque()`, pero para valores que pueden ser dict/list
+        anidados (ej. las secciones de Historia Clínica: examen_fisico,
+        examen_fisico.abdomen, evoluciones[]). Sin esto, un dict/list
+        anidado caía directo a `str(valor)` y el PDF mostraba el repr
+        crudo de Python con llaves — ilegible para el cliente.
+        Evita imprimir estructuras vacías o "no especificado".
+        """
+        if _es_vacio(valor):
+            return
+
+        estilo_titulo = st["subsection"] if nivel == 0 else st["label"]
+
+        if isinstance(valor, dict):
+            story.append(Paragraph(f"<b>{titulo}</b>", estilo_titulo))
+            for k, v in valor.items():
+                if k in CAMPOS_TECNICOS_OCULTOS:
+                    continue
+                bloque_recursivo(k.replace("_", " ").title(), v, nivel + 1)
+            story.append(Spacer(1, 2))
+            return
+
+        if isinstance(valor, list):
+            if valor and all(isinstance(item, dict) for item in valor):
+                story.append(Paragraph(f"<b>{titulo}</b>", estilo_titulo))
+                # No se intenta "singularizar" el título (el español tiene
+                # demasiadas excepciones para adivinarlo bien con un simple
+                # trailing-s) — se usa "Título N" tal cual, ej. "Evoluciones 1".
+                for i, item in enumerate(valor, start=1):
+                    fecha_item = item.get("fecha") if isinstance(item, dict) else None
+                    encabezado = f"{titulo} {i}" + (f" — {fecha_item}" if fecha_item else "")
+                    story.append(Paragraph(f"<i>{encabezado}</i>", st["label"]))
+                    for k, v in item.items():
+                        if k in CAMPOS_TECNICOS_OCULTOS:
+                            continue
+                        bloque_recursivo(k.replace("_", " ").title(), v, nivel + 2)
+                story.append(Spacer(1, 2))
+                return
+            texto = ", ".join(
+                _texto_simple(v) for v in valor if not _es_vacio(v)
+            )
+            if not texto:
+                return
+            story.append(Paragraph(f"<b>{titulo}:</b> {texto}", st["body"]))
+            story.append(Spacer(1, 2))
+            return
+
+        texto = _texto_simple(valor).strip()
+        if not texto or texto.lower() == "no especificado":
+            return
+        story.append(Paragraph(f"<b>{titulo}:</b> {texto}", st["body"]))
+        story.append(Spacer(1, 2))
+
     # ══════════════════════════════════════════════════════════════════════
     # DIAGNÓSTICO RIZOTIPO
     # ══════════════════════════════════════════════════════════════════════
@@ -450,11 +523,9 @@ async def generar_pdf_ficha(ficha_data: dict, cita_data: dict) -> bytes:
     else:
         if de:
             story.append(Paragraph("DETALLES DEL SERVICIO", st["section"]))
-            SKIP = {"cita_id","firma_profesional","fecha_firma",
-                    "profesional_firmante_id","profesional_firmante_email"}
             for k, v in de.items():
-                if k not in SKIP:
-                    bloque(f"{k.replace('_',' ').title()}:", v)
+                if k not in CAMPOS_TECNICOS_OCULTOS:
+                    bloque_recursivo(k.replace("_", " ").title(), v)
 
     # ── FIRMA PROFESIONAL ────────────────────────────────────────────────────
     if de.get("firma_profesional") and de.get("profesional_firmante"):
@@ -673,6 +744,9 @@ async def enviar_correo_con_pdf(
     try:
         from app.utils.branding import get_config
         _cfg = await get_config()
+        if not _cfg.get("emails_habilitados", True):
+            print(f"📭 Envío de correos desactivado (business_config.emails_habilitados=false) — se omite el correo a {destinatario}")
+            return False
         msg = MIMEMultipart()
         msg["Subject"] = asunto
         msg["From"] = formataddr((_cfg.get("nombre_negocio", "GlowUp"), EMAIL_SENDER))

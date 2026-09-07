@@ -72,7 +72,7 @@ export function EstilistasList({
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
           <input
             type="text"
-            placeholder="Buscar estilistas..."
+            placeholder="Buscar profesionales..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-10 pr-3 py-2 bg-white border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-gray-400 focus:ring-1 focus:ring-gray-400 text-gray-900"
@@ -126,7 +126,7 @@ export function EstilistasList({
             <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-3">
               <User className="h-8 w-8 text-gray-400" />
             </div>
-            <p className="text-sm text-gray-600 mb-1">No se encontraron estilistas</p>
+            <p className="text-sm text-gray-600 mb-1">No se encontraron profesionales</p>
             {searchTerm && (
               <p className="text-xs text-gray-500">Intenta con otro término de búsqueda</p>
             )}
@@ -289,7 +289,7 @@ export function EstilistasList({
       {/* Contador elegante */}
       <div className="p-2 border-t border-gray-100 bg-gray-50">
         <p className="text-xs text-gray-600 text-center font-medium">
-          Mostrando {filteredEstilistas.length} de {safeEstilistas.length} estilistas
+          Mostrando {filteredEstilistas.length} de {safeEstilistas.length} profesionales
         </p>
       </div>
     </div>

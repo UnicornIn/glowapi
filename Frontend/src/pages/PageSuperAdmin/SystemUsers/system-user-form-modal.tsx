@@ -22,9 +22,21 @@ const ROLE_OPTIONS: Array<{ label: string; value: SystemUserRole }> = [
   { label: "super_admin", value: "super_admin" },
   { label: "admin_sede", value: "admin_sede" },
   { label: "recepcionista", value: "recepcionista" },
-  { label: "estilista", value: "estilista" },
+  { label: "Profesional", value: "estilista" },
   { label: "call_center", value: "call_center" },
 ];
+
+// "Profesional" no se puede CREAR desde acá — este formulario llama a
+// /auth/register, que solo crea la credencial de login (collection_auth).
+// Un profesional real necesita ADEMÁS su perfil en collection_estilista
+// (servicios que presta, comisiones_por_categoria/comisiones_por_servicio,
+// etc.), que solo crea POST /admin/profesionales/ (pantalla "Profesionales").
+// Creando un "Profesional" desde acá se obtiene una cuenta que puede iniciar
+// sesión pero no aparece en ningún lado como profesional asignable — un
+// usuario roto en la práctica. Sí se deja en la lista para que un
+// profesional YA existente (creado por la vía correcta) se pueda seguir
+// viendo/editando en modo edición sin romper el <select>.
+const CREATABLE_ROLE_OPTIONS = ROLE_OPTIONS.filter((role) => role.value !== "estilista");
 
 const normalizeRole = (role: string) => role.trim().toLowerCase().replace(/[\s-]+/g, "_");
 
@@ -78,6 +90,11 @@ export function SystemUserFormModal({
   const requiresPrimarySede = formData.role !== "super_admin";
   const canConfigureSedesPermitidas =
     formData.role === "admin_sede" || formData.role === "estilista";
+  // Un Profesional ya existente vive realmente en collection_estilista — su
+  // sede/servicios/comisiones se editan desde "Profesionales". Editarlos acá
+  // solo tocaría collection_auth (vía /auth/users/{id}) y desincronizaría
+  // ambas colecciones, ej. sede distinta en el login vs. en su perfil real.
+  const isExistingProfesional = isEditMode && formData.role === "estilista";
   const formatPercentageInput = (value: string) => {
     const normalized = value.replace(/,/g, ".").replace(/[^0-9.]/g, "");
     const [integerPart, decimalPart] = normalized.split(".");
@@ -423,14 +440,25 @@ export function SystemUserFormModal({
                 onChange={(e) => setFormData((prev) => ({ ...prev, role: e.target.value as SystemUserRole }))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-[oklch(0.65_0.25_280)] focus:outline-none focus:ring-2 focus:ring-[oklch(0.65_0.25_280)]/20"
                 required
-                disabled={isSaving}
+                disabled={isSaving || (isEditMode && formData.role === "estilista")}
               >
-                {ROLE_OPTIONS.map((role) => (
+                {(isEditMode ? ROLE_OPTIONS : CREATABLE_ROLE_OPTIONS).map((role) => (
                   <option key={role.value} value={role.value}>
                     {role.label}
                   </option>
                 ))}
               </select>
+              {isEditMode && formData.role === "estilista" ? (
+                <p className="text-xs text-amber-600 mt-1">
+                  Este usuario es un Profesional — para cambiar su rol, sede, servicios o
+                  comisiones, hazlo desde la sección "Profesionales" en vez de acá.
+                </p>
+              ) : !isEditMode ? (
+                <p className="text-xs text-gray-500 mt-1">
+                  Para crear un Profesional (estilista), usa la sección "Profesionales" — ahí
+                  se configuran también los servicios que presta y su comisión.
+                </p>
+              ) : null}
             </div>
 
             <div>
@@ -464,7 +492,7 @@ export function SystemUserFormModal({
                     setIsServiciosDropdownOpen(false);
                   }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-[oklch(0.65_0.25_280)] focus:outline-none focus:ring-2 focus:ring-[oklch(0.65_0.25_280)]/20 text-left flex justify-between items-center"
-                  disabled={isSaving || isLoadingSedes}
+                  disabled={isSaving || isLoadingSedes || isExistingProfesional}
                 >
                   <span className={formData.sede_id ? "text-gray-900" : "text-gray-500"}>
                     {isLoadingSedes ? "Cargando sedes..." : getSedeNombre()}
@@ -514,7 +542,7 @@ export function SystemUserFormModal({
                     setIsServiciosDropdownOpen(false);
                   }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-[oklch(0.65_0.25_280)] focus:outline-none focus:ring-2 focus:ring-[oklch(0.65_0.25_280)]/20 text-left flex justify-between items-center"
-                  disabled={isSaving || isLoadingSedes}
+                  disabled={isSaving || isLoadingSedes || isExistingProfesional}
                 >
                   <span className={formData.sedes_permitidas.length > 0 ? "text-gray-900" : "text-gray-500"}>
                     {isLoadingSedes
@@ -583,7 +611,7 @@ export function SystemUserFormModal({
                   setIsSedesPermitidasDropdownOpen(false);
                 }}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-[oklch(0.65_0.25_280)] focus:outline-none focus:ring-2 focus:ring-[oklch(0.65_0.25_280)]/20 text-left flex justify-between items-center"
-                disabled={isSaving || isLoadingServicios}
+                disabled={isSaving || isLoadingServicios || isExistingProfesional}
               >
                 <span className={formData.especialidades.length > 0 ? "text-gray-900" : "text-gray-500"}>
                   {isLoadingServicios

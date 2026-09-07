@@ -81,7 +81,6 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
     nombre: "",
     email: "",
     sede_id: "",
-    comision: "",
     comision_productos: "",
     especialidades: [] as string[],
     password: "",
@@ -203,7 +202,6 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
           nombre: estilista.nombre || "",
           email: estilista.email || "",
           sede_id: estilista.sede_id || "",
-          comision: estilista.comision !== null && estilista.comision !== undefined ? estilista.comision.toString() : "",
           comision_productos:
             estilista.comision_productos !== null && estilista.comision_productos !== undefined
               ? estilista.comision_productos.toString()
@@ -260,7 +258,6 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
           nombre: "",
           email: "",
           sede_id: "",
-          comision: "",
           comision_productos: "",
           especialidades: [],
           password: "",
@@ -397,18 +394,6 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
       activo: formData.activo
     }
 
-    // Manejo de comisión
-    if (formData.comision.trim() !== "") {
-      const comisionNum = Number(formData.comision);
-      if (!isNaN(comisionNum) && comisionNum > 0) {
-        saveData.comision = comisionNum;
-      } else {
-        saveData.comision = null;
-      }
-    } else {
-      saveData.comision = null;
-    }
-
     if (formData.comision_productos.trim() !== "") {
       const comisionProdNum = Number(formData.comision_productos);
       if (!isNaN(comisionProdNum) && comisionProdNum >= 0 && comisionProdNum <= 100) {
@@ -518,21 +503,6 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
     setFormData({ ...formData, especialidades: nuevasEspecialidades });
   }
 
-  const handleComisionChange = (value: string) => {
-    const cleanedValue = value.replace(/[^\d.]/g, '');
-    const parts = cleanedValue.split('.');
-    
-    if (parts.length > 2) {
-      return;
-    }
-    
-    if (parts[1] && parts[1].length > 2) {
-      return;
-    }
-    
-    setFormData({ ...formData, comision: cleanedValue });
-  }
-
   const handleComisionProductosChange = (value: string) => {
     const cleanedValue = value.replace(/[^\d.]/g, '');
     const parts = cleanedValue.split('.');
@@ -554,7 +524,7 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 overflow-y-auto py-4">
       <div className="bg-white rounded-lg w-full max-w-md p-6 max-h-[90vh] overflow-y-auto my-auto text-gray-900" onClick={stopPropagation}>
         <div className="flex items-center justify-between mb-6">
-          <h2 className="text-xl font-bold">{estilista ? "Editar estilista" : "Añadir estilista"}</h2>
+          <h2 className="text-xl font-bold">{estilista ? "Editar profesional" : "Añadir profesional"}</h2>
           <button 
             onClick={onClose} 
             className="text-gray-900 hover:text-black disabled:opacity-50"
@@ -639,21 +609,6 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">Comisión (%)</label>
-            <input
-              type="text"
-              value={formData.comision}
-              onChange={(e) => handleComisionChange(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900/10"
-              placeholder="Ej: 15.5 (opcional)"
-              disabled={isSaving}
-            />
-            <p className="text-xs text-gray-900 mt-1">
-              Dejar vacío si no aplica comisión. Máximo 2 decimales.
-            </p>
-          </div>
-
-          <div>
             <label className="block text-sm font-medium mb-2">Comisión por productos (%)</label>
             <input
               type="text"
@@ -688,7 +643,7 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
               </div>
               {!canPersistServiceCommissions && (
                 <p className="mt-2 text-xs text-amber-700">
-                  No se detectó un campo de comisiones por servicio en el payload actual del backend para este estilista.
+                  No se detectó un campo de comisiones por servicio en el payload actual del backend para este profesional.
                 </p>
               )}
             </div>
@@ -810,7 +765,7 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
               <>
                 {estilista && horarioId && (
                   <div className="text-xs text-gray-900 bg-gray-100 p-2 rounded">
-                    <p>✅ Este estilista ya tiene un horario configurado (ID: {horarioId})</p>
+                    <p>✅ Este profesional ya tiene un horario configurado (ID: {horarioId})</p>
                   </div>
                 )}
                 
@@ -928,7 +883,7 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
               disabled={isSaving}
             />
             <label htmlFor="activo" className="text-sm font-medium text-gray-900">
-              Estilista activo
+              Profesional activo
             </label>
           </div>
 
@@ -952,7 +907,7 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
                   Guardando...
                 </>
               ) : (
-                estilista ? "Guardar cambios" : "Crear estilista con horario"
+                estilista ? "Guardar cambios" : "Crear profesional con horario"
               )}
             </button>
           </div>
@@ -960,7 +915,7 @@ export function EstilistaFormModal({ isOpen, onClose, onSave, estilista, isSavin
 
         <ServiceCommissionsModal
           isOpen={isCommissionsModalOpen}
-          stylistName={formData.nombre || estilista?.nombre || "estilista"}
+          stylistName={formData.nombre || estilista?.nombre || "profesional"}
           services={serviceOptions}
           initialEntries={serviceCommissionEntries}
           canPersist={canPersistServiceCommissions}

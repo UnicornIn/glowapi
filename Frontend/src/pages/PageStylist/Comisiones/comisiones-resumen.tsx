@@ -113,7 +113,7 @@ export function ComisionesResumen() {
               No hay datos de comisiones
             </h3>
             <p className="text-gray-500">
-              Selecciona un estilista y un rango de fechas para ver las comisiones
+              Selecciona un profesional y un rango de fechas para ver las comisiones
             </p>
           </div>
         ) : (
@@ -122,8 +122,8 @@ export function ComisionesResumen() {
             <div className="mb-4 grid grid-cols-[2fr_1fr_1.5fr_1.5fr_1.5fr] gap-4 border-b pb-3 text-sm font-semibold">
               <div>Servicio/Producto</div>
               <div className="text-right">Precio</div>
-              <div className="text-right">% Comisión Estilista</div>
-              <div className="text-right">Comisión Estilista</div>
+              <div className="text-right">% Comisión Profesional</div>
+              <div className="text-right">Comisión Profesional</div>
               <div className="text-right">% Comisión Casa</div>
             </div>
 
@@ -181,7 +181,7 @@ export function ComisionesResumen() {
                   href="/configuracion/estilistas"
                   className="font-medium text-blue-800 hover:underline"
                 >
-                  Configuración → Estilistas
+                  Configuración → Profesionales
                 </a>{" "}
                 y{" "}
                 <a
@@ -238,7 +238,7 @@ export function ComisionesResumen() {
           {/* Información adicional */}
           <div className="mt-6 rounded-lg bg-gray-50 p-4">
             <p className="text-xs text-gray-600">
-              * Las comisiones se calculan según la configuración establecida para cada estilista y producto.
+              * Las comisiones se calculan según la configuración establecida para cada profesional y producto.
             </p>
           </div>
         </div>
