@@ -65,8 +65,13 @@ const navItems: NavItem[] = [
 
   { title: "Agenda", href: "/agenda", icon: Users, module: APP_MODULES.AGENDA_HOME },
 
-  { title: "Productos", href: "/superadmin/products", icon: Package, module: APP_MODULES.SUPER_PRODUCTS },
-  { title: "Productos", href: "/sede/products", icon: Package, module: APP_MODULES.SEDE_PRODUCTS },
+  // Entrada de sidebar oculta a pedido del negocio (2026-09-07): por ahora
+  // no van a vender/gestionar productos, y la pantalla todavía tiene datos
+  // de ejemplo del cliente original (Rizos Felices) sin limpiar. Se oculta
+  // solo la navegación — la ruta y el módulo de inventario siguen intactos,
+  // por si se retoma más adelante.
+  // { title: "Productos", href: "/superadmin/products", icon: Package, module: APP_MODULES.SUPER_PRODUCTS },
+  // { title: "Productos", href: "/sede/products", icon: Package, module: APP_MODULES.SEDE_PRODUCTS },
 
   { title: "Clientes", href: "/superadmin/clients", icon: Users, module: APP_MODULES.SUPER_CLIENTS },
   { title: "Clientes", href: "/sede/clients", icon: Users, module: APP_MODULES.SEDE_CLIENTS },

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Sidebar } from "../../../components/Layout/Sidebar";
 import { PageHeader } from "../../../components/Layout/PageHeader";
 import { ServicesList } from "./services-list";
@@ -26,6 +26,21 @@ export default function ServicesPage() {
   });
 
   const { user, isLoading: authLoading } = useAuth();
+
+  // Categorías reales, derivadas de los servicios ya cargados — antes el
+  // filtro tenía una lista fija de peluquería (Cortes, Coloración...) que no
+  // representa lo que este negocio ofrece. Ver service-filters.tsx.
+  const categoriasDisponibles = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          services
+            .map((s) => s.categoria)
+            .filter((c): c is string => Boolean(c && c.trim()))
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [services]
+  );
 
   const loadServices = async () => {
     if (!user?.access_token) {
@@ -210,6 +225,7 @@ export default function ServicesPage() {
           <ServiceFilters
             filters={filters}
             onFiltersChange={setFilters}
+            categorias={categoriasDisponibles}
           />
 
           {/* Services Grid */}

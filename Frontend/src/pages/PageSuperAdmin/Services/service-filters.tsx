@@ -10,9 +10,14 @@ interface ServiceFiltersProps {
     activo: string
   }
   onFiltersChange: (filters: any) => void
+  // Categorías reales de los servicios ya cargados — antes esta lista era
+  // fija (Cortes, Coloración, Barba...), pensada para peluquería y ajena a
+  // lo que este negocio realmente ofrece. Se deriva de los servicios reales
+  // en el componente padre, no hay que tocar este archivo si el rubro cambia.
+  categorias: string[]
 }
 
-export function ServiceFilters({ filters, onFiltersChange }: ServiceFiltersProps) {
+export function ServiceFilters({ filters, onFiltersChange, categorias }: ServiceFiltersProps) {
   return (
     <div className="mb-6 space-y-4">
       <div className="relative">
@@ -33,11 +38,11 @@ export function ServiceFilters({ filters, onFiltersChange }: ServiceFiltersProps
           className="flex-1 px-3 py-2 text-sm border border-gray-300 focus:outline-none focus:border-gray-400"
         >
           <option value="all">Todas las categorías</option>
-          <option value="Cortes">Cortes</option>
-          <option value="Coloración">Coloración</option>
-          <option value="Barba">Barba</option>
-          <option value="Tratamientos">Tratamientos</option>
-          <option value="Peinados">Peinados</option>
+          {categorias.map((categoria) => (
+            <option key={categoria} value={categoria}>
+              {categoria}
+            </option>
+          ))}
         </select>
 
         <select

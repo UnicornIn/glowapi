@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Sidebar } from "../../../components/Layout/Sidebar";
 import { PageHeader } from "../../../components/Layout/PageHeader";
 import { ServicesList } from "./services-list";
@@ -32,6 +32,21 @@ export default function ServicesPage() {
   // mapeo país→moneda que no conoce Bolivia y mandaría todo a USD por error
   // (mismo bug ya encontrado y corregido antes en AppointmentForm.tsx).
   const monedaUsuario = user?.moneda || getStoredCurrency('USD');
+
+  // Categorías reales, derivadas de los servicios ya cargados — antes el
+  // filtro tenía una lista fija de peluquería (Cortes, Coloración...) que no
+  // representa lo que este negocio ofrece. Ver service-filters.tsx.
+  const categoriasDisponibles = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          services
+            .map((s) => s.categoria)
+            .filter((c): c is string => Boolean(c && c.trim()))
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [services]
+  );
 
   // Cargar servicios desde la API con la moneda del usuario
   const loadServices = async () => {
@@ -253,6 +268,7 @@ export default function ServicesPage() {
           <ServiceFilters
             filters={filters}
             onFiltersChange={setFilters}
+            categorias={categoriasDisponibles}
           />
 
           {/* Lista de servicios */}

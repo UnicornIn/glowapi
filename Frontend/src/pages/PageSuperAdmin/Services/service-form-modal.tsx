@@ -138,7 +138,7 @@ export function ServiceFormModal({
               className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:border-[oklch(0.55_0.25_280)] focus:outline-none focus:ring-2 focus:ring-[oklch(0.55_0.25_280)]/20"
               required
               disabled={isSaving}
-              placeholder="Ej: Corte de cabello"
+              placeholder="Ej: Consulta general"
             />
           </div>
 
