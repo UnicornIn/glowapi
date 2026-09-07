@@ -287,6 +287,7 @@ export default function ClientsPage() {
         onSuccess={handleSaveClient}
         isSaving={isSaving}
         sedeId={selectedSede !== "all" ? selectedSede : ""}
+        sedes={sedes}
       />
     </div>
   )

@@ -6,15 +6,22 @@ import { Button } from "../../../components/ui/button"
 import { crearCliente } from "../../../components/Quotes/clientsService"
 import { useAuth } from "../../../components/Auth/AuthContext"
 import { DatePicker } from "../../../components/ui/DatePicker"
+import type { Sede } from "../Sedes/sedeService"
 interface ClientFormModalProps {
   isOpen: boolean
   onClose: () => void
   onSuccess: () => Promise<void>
   isSaving?: boolean
   sedeId: string
+  // Lista completa de sedes — necesaria para dejar elegir sede manualmente
+  // cuando la vista está en "Todas las sedes" (sedeId llega vacío) y un
+  // super_admin no tiene una sede propia fija en su sesión. Sin esto, crear
+  // un cliente fallaba con el 400 crudo del backend ("Debes seleccionar una
+  // sede para crear el cliente") sin ninguna forma de resolverlo desde acá.
+  sedes?: Sede[]
 }
 
-export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, sedeId }: ClientFormModalProps) {
+export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, sedeId, sedes = [] }: ClientFormModalProps) {
   const { user, activeSedeId } = useAuth()
   const [formData, setFormData] = useState({
     nombre: "",
@@ -25,11 +32,12 @@ export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, 
     fecha_de_nacimiento: "",
     notas: ""
   })
+  const [sedeSeleccionadaManual, setSedeSeleccionadaManual] = useState("")
 
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
   const [localIsSaving, setLocalIsSaving] = useState(false)
-  const resolvedSedeId = String(
+  const sedeAutomatica = String(
     sedeId ||
       activeSedeId ||
       user?.sede_id ||
@@ -37,6 +45,11 @@ export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, 
       localStorage.getItem("beaux-sede_id") ||
       ""
   ).trim()
+  // Si no hay ninguna sede resuelta automáticamente (vista "Todas las
+  // sedes" + usuario sin sede propia, ej. super_admin), se exige elegir una
+  // acá mismo en vez de fallar recién al enviar el formulario.
+  const requiereSeleccionManual = !sedeAutomatica
+  const resolvedSedeId = sedeAutomatica || sedeSeleccionadaManual
 
   // Resetear form cuando se abre
   useEffect(() => {
@@ -50,6 +63,7 @@ export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, 
         fecha_de_nacimiento: "",
         notas: ""
       })
+      setSedeSeleccionadaManual("")
       setError(null)
       setSuccess(false)
     }
@@ -77,6 +91,10 @@ export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, 
 
       if (!user?.access_token) {
         throw new Error('No hay sesión activa')
+      }
+
+      if (requiereSeleccionManual && !resolvedSedeId) {
+        throw new Error('Selecciona una sede para el cliente')
       }
 
       const clienteData = {
@@ -128,6 +146,28 @@ export function ClientFormModal({ isOpen, onClose, onSuccess, isSaving = false, 
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
+          {requiereSeleccionManual && (
+            <div>
+              <label className="text-xs font-medium text-gray-700 mb-1 block">
+                Sede *
+              </label>
+              <select
+                value={sedeSeleccionadaManual}
+                onChange={(e) => setSedeSeleccionadaManual(e.target.value)}
+                required
+                disabled={localIsSaving || isSaving}
+                className="w-full h-8 text-sm border border-gray-300 rounded px-2 focus:border-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-400 disabled:opacity-50"
+              >
+                <option value="">-- Selecciona una sede --</option>
+                {sedes.map((s) => (
+                  <option key={s.sede_id} value={s.sede_id}>
+                    {s.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           <div>
             <label className="text-xs font-medium text-gray-700 mb-1 block">
               Nombre completo *
