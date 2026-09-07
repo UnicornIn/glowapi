@@ -13,6 +13,12 @@ env/
 .env
 .env.*
 !.env.example
+# .env.production del Frontend no lleva secretos, solo la URL real del
+# backend — necesario que esté commiteado para que "npm run build" en
+# cualquier máquina genere el build de producción correcto (Vite carga
+# .env.local en TODOS los modos, incluido build; sin este archivo el build
+# de producción quedaba apuntando al proxy de desarrollo /__api/).
+!Frontend/.env.production
 *.pem
 *.key
 

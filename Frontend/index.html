@@ -9,6 +9,23 @@
     <meta http-equiv="Content-Language" content="es" />
     <title>NEXA</title>
     <meta name="description" content="Sistema de gestión - Nexa" />
+
+    <!-- Open Graph / WhatsApp / Facebook — sin esto, la vista previa al
+         compartir el link cae al <title>/description de arriba y sin
+         imagen. WhatsApp cachea la vista previa por URL la primera vez que
+         se comparte — si ya se compartió antes con datos viejos, hace falta
+         forzar un re-scrape (Facebook Sharing Debugger) después de subir
+         este cambio, no basta con actualizar el sitio. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="NEXA" />
+    <meta property="og:title" content="NEXA" />
+    <meta property="og:description" content="Sistema de gestión - Nexa" />
+    <meta property="og:image" content="https://app.glowup.unicornioindustries.co/nexa-icon.png" />
+    <meta property="og:url" content="https://app.glowup.unicornioindustries.co/" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="NEXA" />
+    <meta name="twitter:description" content="Sistema de gestión - Nexa" />
+    <meta name="twitter:image" content="https://app.glowup.unicornioindustries.co/nexa-icon.png" />
   </head>
   <body translate="no" class="notranslate">
     <div id="root" translate="no" class="notranslate"></div>
