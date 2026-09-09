@@ -1056,6 +1056,34 @@ async def historial_cliente(
 # ============================================================
 # PAQUETES DE SESIONES DEL CLIENTE
 # ============================================================
+def _enriquecer_paquete_con_pago(paquete: dict) -> dict:
+    """
+    `valor_total`/`saldo_pendiente`/`estado_pago` NO se guardan en el
+    documento — se calculan siempre acá, en vivo, desde `valor_por_sesion`
+    (fijo) y `sesiones_totales` (la única fuente de verdad del conteo). Así,
+    si `ajustar_paquete` corrige el conteo, el saldo a cobrar queda correcto
+    automáticamente sin tener que sincronizar nada aparte.
+    """
+    valor_por_sesion = float(paquete.get("valor_por_sesion", 0) or 0)
+    sesiones_totales = int(paquete.get("sesiones_totales", 0) or 0)
+    abono = round(float(paquete.get("abono", 0) or 0), 2)
+
+    valor_total = round(valor_por_sesion * sesiones_totales, 2)
+    saldo_pendiente = max(0.0, round(valor_total - abono, 2))
+    estado_pago = (
+        "pagado" if saldo_pendiente <= 0
+        else "abonado" if abono > 0
+        else "pendiente"
+    )
+
+    paquete["valor_total"] = valor_total
+    paquete["saldo_pendiente"] = saldo_pendiente
+    paquete["estado_pago"] = estado_pago
+    paquete.setdefault("abono", 0)
+    paquete.setdefault("historial_pagos", [])
+    return paquete
+
+
 @router.get("/{id}/paquetes", response_model=List[dict])
 async def paquetes_cliente(
     id: str,
@@ -1065,11 +1093,12 @@ async def paquetes_cliente(
     """
     Lista los paquetes de sesiones prepagas del cliente (ej. "5 sesiones de
     Terapia individual piso pélvico") con su saldo restante. Los crea
-    automáticamente el backend al facturar una cita que compra un paquete
-    (`comprar_paquete_sesiones` en la línea del servicio, ver
-    app.bills.routes) — no hay un endpoint para crearlos a mano. Usado por
-    "Nueva Cita" (ofrecer "usar sesión del paquete" al agendar) y por el
-    detalle del cliente (mostrar saldo).
+    automáticamente el backend al finalizar o facturar una cita que compra
+    un paquete (`comprar_paquete_sesiones` en la línea del servicio, ver
+    app.scheduling.submodules.quotes.paquetes_helpers) — no hay un endpoint
+    para crearlos a mano. Usado por "Nueva Cita" (ofrecer "usar sesión del
+    paquete" al agendar), por la pestaña "Pagos" de cualquier cita ligada a
+    un paquete, y por el detalle del cliente (mostrar saldo).
     """
     rol = current_user.get("rol")
     if rol not in ["admin_sede", "super_admin", "estilista", "call_center", "recepcionista"]:
@@ -1083,7 +1112,31 @@ async def paquetes_cliente(
     paquetes = await collection_client_packages.find(query).sort("fecha_compra", -1).to_list(None)
     for p in paquetes:
         p["_id"] = str(p["_id"])
+        _enriquecer_paquete_con_pago(p)
     return paquetes
+
+
+@router.get("/paquetes/{paquete_id}", response_model=dict)
+async def obtener_paquete(
+    paquete_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Un paquete puntual por id — usado por la pestaña "Pagos" de una cita
+    ligada a un paquete (necesita el abono/historial actuales, sin importar
+    si el paquete ya se agotó o está inactivo, a diferencia del listado de
+    arriba que por defecto solo trae los que todavía tienen saldo).
+    """
+    rol = current_user.get("rol")
+    if rol not in ["admin_sede", "super_admin", "estilista", "call_center", "recepcionista"]:
+        raise HTTPException(403, "No autorizado")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+
+    paquete["_id"] = str(paquete["_id"])
+    return _enriquecer_paquete_con_pago(paquete)
 
 
 class AjustarPaqueteRequest(BaseModel):
@@ -1124,6 +1177,168 @@ async def ajustar_paquete(
         },
     )
     return {"success": True, "paquete_id": paquete_id, "sesiones_restantes": data.sesiones_restantes}
+
+
+# Mismo conjunto que METODOS_PAGO_CORREGIBLES en
+# app.scheduling.submodules.quotes.routes_quotes (pagos de citas) —
+# duplicado acá en vez de importado para evitar un import circular entre
+# ambos routers (routes_quotes ya importa de este archivo). Excluye
+# giftcard/saldo_a_favor: esos generan movimientos reales en otras
+# colecciones que no tienen sentido para un pago repartido entre varias
+# citas del mismo paquete.
+METODOS_PAGO_PAQUETE = {
+    "efectivo", "transferencia", "tarjeta", "tarjeta_credito", "tarjeta_debito",
+    "otros", "addi", "link_de_pago", "descuento_nomina", "abono_transferencia",
+}
+
+
+class RegistrarPagoPaqueteRequest(BaseModel):
+    monto: float = Field(..., gt=0)
+    metodo: str
+    notas: Optional[str] = None
+
+
+@router.post("/paquetes/{paquete_id}/pago", response_model=dict)
+async def registrar_pago_paquete(
+    paquete_id: str,
+    data: RegistrarPagoPaqueteRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Registra un abono/pago contra el PAQUETE completo, no contra una cita
+    puntual — este negocio cobra una parte al reservar el paquete y el
+    resto en cualquier punto durante las sesiones, y el cliente puede pagar
+    desde cualquiera de las citas que pertenecen a ese paquete (todas ven
+    el mismo abonado/historial, ver la pestaña "Pagos" del frontend).
+    """
+    if current_user.get("rol") not in ["admin_sede", "super_admin", "recepcionista", "call_center"]:
+        raise HTTPException(403, "No autorizado para registrar pagos")
+
+    metodo = data.metodo.lower().strip()
+    if metodo not in METODOS_PAGO_PAQUETE:
+        raise HTTPException(400, f"Método de pago inválido: '{data.metodo}'")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+
+    paquete_enriquecido = _enriquecer_paquete_con_pago(dict(paquete))
+    saldo_pendiente_actual = paquete_enriquecido["saldo_pendiente"]
+    abono_actual = paquete_enriquecido["abono"]
+
+    if saldo_pendiente_actual <= 0:
+        raise HTTPException(400, "El paquete no tiene saldo pendiente")
+
+    monto = round(float(data.monto), 2)
+    if monto > saldo_pendiente_actual:
+        raise HTTPException(
+            400,
+            f"El monto ({monto}) excede el saldo pendiente del paquete ({saldo_pendiente_actual})"
+        )
+
+    nuevo_abono = round(abono_actual + monto, 2)
+    nuevo_saldo = round(saldo_pendiente_actual - monto, 2)
+    tipo_pago = (
+        ("pago_completo" if nuevo_saldo <= 0 else "abono_inicial")
+        if abono_actual == 0 else "pago_adicional"
+    )
+
+    nuevo_pago = {
+        "fecha": datetime.now(),
+        "monto": monto,
+        "metodo": metodo,
+        "tipo": tipo_pago,
+        "registrado_por": current_user.get("email"),
+        "saldo_despues": nuevo_saldo,
+        "notas": data.notas,
+    }
+
+    await collection_client_packages.update_one(
+        {"paquete_id": paquete_id},
+        {
+            "$inc": {"abono": monto},
+            "$push": {"historial_pagos": nuevo_pago},
+        },
+    )
+
+    paquete_actualizado = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    paquete_actualizado["_id"] = str(paquete_actualizado["_id"])
+    return _enriquecer_paquete_con_pago(paquete_actualizado)
+
+
+class CorregirPagoPaqueteRequest(BaseModel):
+    metodo: Optional[str] = Field(None, description="Nuevo método de pago para este registro del historial")
+    monto: Optional[float] = Field(None, gt=0, description="Nuevo monto para este registro del historial")
+
+
+@router.patch("/paquetes/{paquete_id}/pagos/{indice}", response_model=dict)
+async def corregir_pago_paquete(
+    paquete_id: str,
+    indice: int,
+    data: CorregirPagoPaqueteRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Corrige un pago ya registrado contra un paquete — mismo criterio que
+    `corregir_pago` de citas (routes_quotes.py): recalcula saldo_despues en
+    cascada, reclasifica el tipo solo si es el primer pago del historial."""
+    if current_user.get("rol") not in ["super_admin", "admin_sede", "recepcionista", "call_center"]:
+        raise HTTPException(403, "No autorizado para corregir pagos")
+
+    if data.metodo is None and data.monto is None:
+        raise HTTPException(400, "Debe enviar 'metodo' y/o 'monto' para corregir")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+
+    historial_pagos = paquete.get("historial_pagos") or []
+    if indice < 0 or indice >= len(historial_pagos):
+        raise HTTPException(404, "Pago no encontrado en el historial de este paquete")
+
+    pago_actual = historial_pagos[indice]
+
+    update_set = {}
+
+    if data.metodo is not None:
+        nuevo_metodo = data.metodo.lower().strip()
+        if nuevo_metodo not in METODOS_PAGO_PAQUETE:
+            raise HTTPException(400, f"Método de pago inválido: '{data.metodo}'")
+        update_set[f"historial_pagos.{indice}.metodo"] = nuevo_metodo
+
+    if data.monto is not None:
+        monto_viejo = round(float(pago_actual.get("monto", 0) or 0), 2)
+        monto_nuevo = round(float(data.monto), 2)
+        delta = round(monto_nuevo - monto_viejo, 2)
+
+        if delta != 0:
+            nuevo_saldo_de_este_pago = None
+            for j in range(indice, len(historial_pagos)):
+                saldo_viejo_j = round(float(historial_pagos[j].get("saldo_despues", 0) or 0), 2)
+                nuevo_saldo_j = round(saldo_viejo_j - delta, 2)
+                update_set[f"historial_pagos.{j}.saldo_despues"] = nuevo_saldo_j
+                if j == indice:
+                    nuevo_saldo_de_este_pago = nuevo_saldo_j
+            update_set[f"historial_pagos.{indice}.monto"] = monto_nuevo
+
+            if indice == 0 and nuevo_saldo_de_este_pago is not None:
+                update_set[f"historial_pagos.{indice}.tipo"] = (
+                    "pago_completo" if nuevo_saldo_de_este_pago <= 0 else "abono_inicial"
+                )
+
+            abono_actual = round(float(paquete.get("abono", 0) or 0), 2)
+            update_set["abono"] = round(abono_actual + delta, 2)
+
+    update_set[f"historial_pagos.{indice}.corregido_por"] = current_user.get("email")
+    update_set[f"historial_pagos.{indice}.corregido_en"] = datetime.now()
+
+    await collection_client_packages.update_one(
+        {"paquete_id": paquete_id},
+        {"$set": update_set},
+    )
+
+    paquete_actualizado = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    paquete_actualizado["_id"] = str(paquete_actualizado["_id"])
+    return _enriquecer_paquete_con_pago(paquete_actualizado)
 
 
 # ============================================================

@@ -35,6 +35,10 @@ from app.commissions.comision_engine import (
     resolver_config_comision, calcular_comision
 )
 from app.commissions.comision_context import construir_contexto, recalcular_comisiones_periodo
+from app.scheduling.submodules.quotes.paquetes_helpers import (
+    procesar_paquete_servicio,
+    propagar_facturacion_a_paquete,
+)
 
 router = APIRouter()
 
@@ -609,62 +613,38 @@ async def facturar_cita_o_venta(
             })
             print(f"  ✅ {nombre}: ${precio} (comisión: ${comision_servicio})")
 
-            # ⭐ Redimir la sesión del paquete — decremento atómico y con
-            # validación dura (a diferencia del chequeo "blando" al agendar):
-            # si para cuando se factura el paquete ya no tiene saldo (ej. se
-            # redimió en otra cita primero), se rechaza la facturación de esta
-            # línea en vez de dejarla pasar "gratis" sin respaldo de saldo.
-            if paquete_id_redimido:
-                redencion = await collection_client_packages.update_one(
-                    {"paquete_id": paquete_id_redimido, "sesiones_restantes": {"$gte": cantidad}},
-                    {
-                        "$inc": {"sesiones_restantes": -cantidad, "sesiones_usadas": cantidad},
-                        "$push": {"historial_uso": {
-                            "cita_id": id,
-                            "fecha": datetime.now(),
-                            "profesional_id": profesional_id,
-                            "sesiones": cantidad,
-                        }},
-                    },
+            # ⭐ Crear/redimir el paquete de sesiones — misma lógica que usa
+            # `finalizar_servicio_con_pdf` (este negocio no siempre factura,
+            # así que el paquete también puede nacer/consumirse ahí). La
+            # función es idempotente: si esta línea ya se procesó al
+            # finalizar el servicio, no vuelve a descontar ni a crear un
+            # segundo paquete.
+            if paquete_id_redimido or comprar_paquete_sesiones:
+                resultado_paquete = await procesar_paquete_servicio(
+                    servicio_item=servicio_item,
+                    cita_id=id,
+                    cliente_id=cliente_id,
+                    sede_id=sede_id,
+                    moneda_sede=moneda_sede,
+                    profesional_id=profesional_id,
+                    usuario_email=current_user.get("email"),
+                    subtotal=subtotal,
+                    origen_tipo=tipo,
+                    abono_origen=documento.get("abono", 0),
+                    historial_pagos_origen=documento.get("historial_pagos"),
                 )
-                if redencion.matched_count == 0:
+                if resultado_paquete and not resultado_paquete.get("ok"):
+                    # Validación dura (a diferencia del chequeo "blando" al
+                    # agendar): si para cuando se factura el paquete ya no
+                    # tiene saldo (ej. se redimió en otra cita primero), se
+                    # rechaza la facturación de esta línea en vez de dejarla
+                    # pasar "gratis" sin respaldo de saldo.
                     raise HTTPException(
                         status_code=400,
                         detail=f"El paquete de sesiones ya no tiene saldo suficiente para facturar '{nombre}'. Corrige el pago de esta cita antes de facturar."
                     )
-
-            # ⭐ Si esta línea compra un paquete de sesiones nuevo, crear el
-            # saldo del cliente al confirmarse la venta — este es el único
-            # punto donde un paquete nace. La primera sesión (esta misma
-            # cita) queda descontada de inmediato: el cliente vino, pagó el
-            # paquete completo y ya usó una sesión hoy.
-            if comprar_paquete_sesiones:
-                sesiones_totales = int(comprar_paquete_sesiones)
-                await collection_client_packages.insert_one({
-                    "paquete_id": f"PKG-{random.randint(10000, 99999)}",
-                    "cliente_id": cliente_id,
-                    "sede_id": sede_id,
-                    "servicio_id": servicio_id,
-                    "nombre_servicio": nombre,
-                    "sesiones_totales": sesiones_totales,
-                    "sesiones_usadas": 1,
-                    "sesiones_restantes": max(sesiones_totales - 1, 0),
-                    "valor_por_sesion": valor_por_sesion_nuevo,
-                    "moneda": moneda_sede,
-                    "activo": True,
-                    "fecha_compra": datetime.now(),
-                    "cita_origen_id": id if tipo == "cita" else None,
-                    "venta_origen_id": id if tipo == "venta" else None,
-                    "creado_por": current_user.get("email"),
-                    "historial_uso": [{
-                        "cita_id": id,
-                        "fecha": datetime.now(),
-                        "profesional_id": profesional_id,
-                        "sesiones": 1,
-                        "nota": "Primera sesión del paquete, incluida en la compra",
-                    }],
-                })
-                print(f"  🎟️ Paquete de {sesiones_totales} sesiones creado para cliente {cliente_id} ({nombre}), 1 sesión ya consumida")
+                if resultado_paquete and resultado_paquete.get("ok"):
+                    print(f"  🎟️ Paquete procesado para '{nombre}': sesión {resultado_paquete.get('numero_sesion')} de {resultado_paquete.get('sesiones_totales')}")
 
     elif documento.get("servicio_id"):
         # Estructura muy antigua (un solo servicio)
@@ -980,6 +960,20 @@ async def facturar_cita_o_venta(
             }}
         )
         print("✅ Cita actualizada")
+
+        # ⭐ Un paquete de sesiones es UNA sola factura, pero cada sesión es
+        # su propia cita en la agenda — propagar "Facturada" a las demás
+        # citas del mismo paquete para que la agenda quede visualmente
+        # consistente (ver docstring de propagar_facturacion_a_paquete).
+        propagadas = await propagar_facturacion_a_paquete(
+            servicios_cita=documento.get("servicios", []),
+            cita_id_facturada=id,
+            numero_comprobante=numero_comprobante,
+            fecha_facturacion=fecha_actual,
+            usuario_email=current_user.get("email"),
+        )
+        if propagadas:
+            print(f"✅ Facturación propagada a {propagadas} sesión(es) más del mismo paquete")
 
     # ====================================
     # 🔟 CREAR FACTURA EN INVOICES

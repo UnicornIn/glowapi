@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.scheduling.submodules.fichas.controllers import generar_y_enviar_pdf_ficha
+from app.scheduling.submodules.quotes.paquetes_helpers import procesar_paquete_servicio, revertir_paquete_servicio
 from app.commissions.comision_engine import resolver_config_comision, calcular_comision
 from app.commissions.comision_context import construir_contexto
 from app.scheduling.models import Cita, ProductoItem, PagoRequest, ServicioEnCita, ServicioEnFicha
@@ -103,6 +104,51 @@ async def resolve_cita_by_id(cita_id: str) -> Optional[dict]:
         return None
 
 
+def _calcular_paquete_info_servicio(serv_item: dict, paquetes_db_map: dict) -> Optional[dict]:
+    """
+    Arma la info de paquete a mostrar para una línea de servicio — usada
+    por cualquier listado de citas (agenda del profesional, agenda del
+    admin) para mostrar el badge "Sesión N de M".
+
+    - Si la línea ya tiene `paquete_id` (redimida contra un paquete
+      existente, o ya consumida con `numero_sesion` estampado) → usa el
+      paquete real (join contra `paquetes_db_map`). "M" siempre se lee en
+      vivo (puede cambiar si se corrige el conteo); "N" es el hecho
+      histórico ya estampado, o None si todavía no se consumió.
+    - Si la línea solo tiene `comprar_paquete_sesiones` (compra nueva que
+      todavía no se procesó porque la cita no se ha finalizado — no existe
+      ningún documento `client_packages` todavía) → no hay paquete real
+      que buscar, pero ya se sabe que esta sería la sesión 1 de N.
+    """
+    paquete_id = serv_item.get("paquete_id")
+    if paquete_id:
+        paquete_doc = paquetes_db_map.get(paquete_id)
+        if not paquete_doc:
+            return None
+        return {
+            "paquete_id":         paquete_doc.get("paquete_id"),
+            "nombre_servicio":    paquete_doc.get("nombre_servicio"),
+            "sesiones_totales":   paquete_doc.get("sesiones_totales"),
+            "sesiones_usadas":    paquete_doc.get("sesiones_usadas"),
+            "sesiones_restantes": paquete_doc.get("sesiones_restantes"),
+            "numero_sesion":      serv_item.get("numero_sesion"),
+        }
+
+    comprar = serv_item.get("comprar_paquete_sesiones")
+    if comprar:
+        sesiones_totales = int(comprar)
+        return {
+            "paquete_id":         None,
+            "nombre_servicio":    serv_item.get("nombre"),
+            "sesiones_totales":   sesiones_totales,
+            "sesiones_usadas":    0,
+            "sesiones_restantes": max(sesiones_totales - 1, 0),
+            "numero_sesion":      1,
+        }
+
+    return None
+
+
 async def _enriquecer_citas_con_servicios(citas: list) -> list:
     """
     Enriquece una lista de citas con `servicio_nombre`, `servicio_duracion` y
@@ -132,9 +178,29 @@ async def _enriquecer_citas_con_servicios(citas: list) -> list:
         ).to_list(None)
         servicios_map = {s["servicio_id"]: s for s in servicios}
 
+    # Paquetes de sesiones — para que la agenda (admin y profesional) pueda
+    # mostrar "Sesión N de M" sin que cada vista tenga que resolverlo por su
+    # cuenta. Ver `_calcular_paquete_info_servicio`.
+    todos_paquete_ids = {
+        s.get("paquete_id")
+        for cita in citas
+        for s in cita.get("servicios", [])
+        if s.get("paquete_id")
+    }
+    paquetes_db_map = {}
+    if todos_paquete_ids:
+        paquetes_db_list = await collection_client_packages.find({
+            "paquete_id": {"$in": list(todos_paquete_ids)}
+        }).to_list(None)
+        paquetes_db_map = {p["paquete_id"]: p for p in paquetes_db_list}
+
     for cita in citas:
         try:
             normalize_cita_doc(cita)
+
+            for s in cita.get("servicios", []):
+                if isinstance(s, dict):
+                    s["paquete"] = _calcular_paquete_info_servicio(s, paquetes_db_map)
 
             # ⭐ NUEVA ESTRUCTURA (con nombre y precio en servicios)
             if "servicios" in cita and cita["servicios"] and isinstance(cita["servicios"][0], dict):
@@ -1590,6 +1656,19 @@ async def editar_cita(
         duracion_total = 0
         nombres_servicios = []
 
+        # Líneas tal como estaban ANTES de esta edición (por servicio_id) —
+        # se usan para (a) preservar paquete_id/comprar_paquete_sesiones en
+        # líneas que no las mandan explícitas (evita perder la marca de
+        # paquete en cualquier edición no relacionada, ej. mover el
+        # horario), y (b) detectar si se agregó/quitó/cambió la marca de
+        # paquete para procesar el efecto real (Fase 2 del plan de paquetes).
+        servicios_anteriores_map = {
+            s.get("servicio_id"): s
+            for s in cita_actual.get("servicios", [])
+            if s.get("servicio_id")
+        }
+        cita_ya_finalizada = estado_actual == "finalizado"
+
         for servicio_item in cambios["servicios"]:
             if not isinstance(servicio_item, dict):
                 raise HTTPException(status_code=400, detail="Formato inválido en servicios")
@@ -1653,14 +1732,137 @@ async def editar_cita(
             duracion_total += duracion_servicio * cantidad
             nombres_servicios.append(f"{nombre_servicio} x{cantidad}" if cantidad > 1 else nombre_servicio)
 
+            # ⭐ Paquetes de sesiones — preservar si no viene explícito, y
+            # procesar el efecto real (crear/redimir/revertir) si la marca
+            # cambió y la cita ya está finalizada (retroactivo: el servicio
+            # ya se prestó). Si la cita todavía no está finalizada, el tag
+            # solo se guarda — se resuelve normalmente al Finalizar (Fase 1).
+            servicio_anterior = servicios_anteriores_map.get(servicio_id, {})
+            paquete_id_anterior = servicio_anterior.get("paquete_id")
+            comprar_anterior = servicio_anterior.get("comprar_paquete_sesiones")
+            numero_sesion_final = servicio_anterior.get("numero_sesion")
+
+            paquete_id_final = (
+                servicio_item["paquete_id"] if "paquete_id" in servicio_item
+                else paquete_id_anterior
+            )
+            comprar_final = (
+                servicio_item["comprar_paquete_sesiones"] if "comprar_paquete_sesiones" in servicio_item
+                else comprar_anterior
+            )
+
+            if cita_ya_finalizada:
+                if paquete_id_final != paquete_id_anterior:
+                    if paquete_id_anterior:
+                        resultado = await revertir_paquete_servicio(
+                            cita_id=cita_id, paquete_id_anterior=paquete_id_anterior,
+                        )
+                        if resultado and not resultado.get("ok"):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"No se puede quitar el paquete de '{nombre_servicio}': otras citas ya usaron sesiones de él."
+                            )
+                        numero_sesion_final = None
+                    if paquete_id_final:
+                        resultado = await procesar_paquete_servicio(
+                            servicio_item={
+                                "servicio_id": servicio_id, "nombre": nombre_servicio,
+                                "cantidad": cantidad, "paquete_id": paquete_id_final,
+                            },
+                            cita_id=cita_id, cliente_id=cita_actual.get("cliente_id"),
+                            sede_id=cita_actual.get("sede_id"), moneda_sede=moneda_sede,
+                            profesional_id=cita_actual.get("profesional_id"),
+                            usuario_email=current_user.get("email"), subtotal=subtotal,
+                        )
+                        if resultado and not resultado.get("ok"):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"No se pudo asignar el paquete a '{nombre_servicio}': {resultado.get('motivo')}"
+                            )
+                        if resultado:
+                            numero_sesion_final = resultado.get("numero_sesion")
+
+                if comprar_final != comprar_anterior:
+                    if comprar_anterior:
+                        resultado = await revertir_paquete_servicio(
+                            cita_id=cita_id, comprar_paquete_sesiones_anterior=comprar_anterior,
+                            servicio_id_anterior=servicio_id,
+                        )
+                        if resultado and not resultado.get("ok"):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"No se puede quitar el paquete de '{nombre_servicio}': otras citas ya usaron sesiones de él."
+                            )
+                        numero_sesion_final = None
+                    if comprar_final:
+                        resultado = await procesar_paquete_servicio(
+                            servicio_item={
+                                "servicio_id": servicio_id, "nombre": nombre_servicio,
+                                "cantidad": cantidad, "comprar_paquete_sesiones": comprar_final,
+                            },
+                            cita_id=cita_id, cliente_id=cita_actual.get("cliente_id"),
+                            sede_id=cita_actual.get("sede_id"), moneda_sede=moneda_sede,
+                            profesional_id=cita_actual.get("profesional_id"),
+                            usuario_email=current_user.get("email"), subtotal=subtotal,
+                            abono_origen=cita_actual.get("abono", 0),
+                            historial_pagos_origen=cita_actual.get("historial_pagos"),
+                        )
+                        if resultado and not resultado.get("ok"):
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"No se pudo crear el paquete de '{nombre_servicio}': {resultado.get('motivo')}"
+                            )
+                        if resultado:
+                            numero_sesion_final = resultado.get("numero_sesion")
+                            # La compra no manda paquete_id en el request (el
+                            # paquete todavía no existe) — sin esto, la cita
+                            # origen de una compra nunca sabría a qué paquete
+                            # quedó ligada (necesario para la pestaña "Pagos").
+                            paquete_id_final = resultado.get("paquete_id")
+            elif not paquete_id_final and not comprar_final:
+                numero_sesion_final = None
+
             servicios_procesados.append({
                 "servicio_id": servicio_id,
                 "nombre": nombre_servicio,
                 "precio_personalizado": es_personalizado,
                 "precio": round(precio, 2),
                 "cantidad": cantidad,
-                "subtotal": subtotal
+                "subtotal": subtotal,
+                "paquete_id": paquete_id_final,
+                "comprar_paquete_sesiones": comprar_final,
+                "numero_sesion": numero_sesion_final,
             })
+
+        # Líneas que existían antes y ya NO están en el nuevo array (se
+        # eliminaron por completo, no solo se les quitó el tag) — si
+        # tenían un paquete y la cita ya está finalizada, aplica la misma
+        # regla de reversión/bloqueo.
+        if cita_ya_finalizada:
+            servicio_ids_nuevos = {s["servicio_id"] for s in servicios_procesados}
+            for servicio_id_viejo, servicio_viejo in servicios_anteriores_map.items():
+                if servicio_id_viejo in servicio_ids_nuevos:
+                    continue
+                if servicio_viejo.get("paquete_id"):
+                    resultado = await revertir_paquete_servicio(
+                        cita_id=cita_id, paquete_id_anterior=servicio_viejo.get("paquete_id"),
+                    )
+                    if resultado and not resultado.get("ok"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"No se puede quitar '{servicio_viejo.get('nombre', servicio_id_viejo)}': otras citas ya usaron sesiones de su paquete."
+                        )
+                elif servicio_viejo.get("comprar_paquete_sesiones"):
+                    resultado = await revertir_paquete_servicio(
+                        cita_id=cita_id,
+                        comprar_paquete_sesiones_anterior=servicio_viejo.get("comprar_paquete_sesiones"),
+                        servicio_id_anterior=servicio_id_viejo,
+                    )
+                    if resultado and not resultado.get("ok"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"No se puede quitar '{servicio_viejo.get('nombre', servicio_id_viejo)}': otras citas ya usaron sesiones de su paquete."
+                        )
 
         cambios["servicios"] = servicios_procesados
         cambios["servicio_nombre"] = ", ".join(nombres_servicios) if nombres_servicios else "Sin servicio"
@@ -1881,10 +2083,31 @@ async def editar_cita(
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
 
+    # ⭐ Sync de ficha ligada — la ficha copia servicio_id/servicio_nombre/
+    # servicios/precio de la cita SOLO al crearse; si los servicios se
+    # editan después (ej. se convirtió en un paquete de sesiones), la ficha
+    # se queda desactualizada salvo que se refleje acá también. Solo se
+    # tocan esos 4 campos — nunca datos_especificos, estado, ni fotos.
+    if "servicios" in cambios:
+        ficha_ligada = await collection_card.find_one({"datos_especificos.cita_id": cita_id})
+        if ficha_ligada:
+            await collection_card.update_one(
+                {"_id": ficha_ligada["_id"]},
+                {"$set": {
+                    "servicio_id": servicios_procesados[0]["servicio_id"] if servicios_procesados else None,
+                    "servicio_nombre": cambios.get("servicio_nombre"),
+                    "servicios": [
+                        {"servicio_id": s["servicio_id"], "nombre": s["nombre"], "precio": s["precio"]}
+                        for s in servicios_procesados
+                    ],
+                    "precio": valor_servicios,
+                }}
+            )
+
     # Obtener cita actualizada
     cita_actualizada = await collection_citas.find_one({"_id": cita_object_id})
     normalize_cita_doc(cita_actualizada)
-    
+
     return {"success": True, "cita": cita_actualizada}
 
 # =============================================================
@@ -2873,6 +3096,24 @@ async def get_citas_estilista(
             if s.get("servicio_id"): servicios_db_map[s["servicio_id"]] = s
             if s.get("unique_id"):   servicios_db_map[s["unique_id"]] = s
 
+    # Paquetes de sesiones canjeados en estas citas — sin esto, el
+    # estilista no tiene forma de saber que una cita es una sesión de un
+    # paquete (ni cuántas le quedan al cliente) fuera de la pantalla de
+    # "Nueva Cita", donde se elige el canje una sola vez al agendar.
+    todos_paquete_ids = {
+        serv_item.get("paquete_id")
+        for c in citas
+        for serv_item in c.get("servicios", [])
+        if serv_item.get("paquete_id")
+    }
+    paquetes_db_map = {}
+    if todos_paquete_ids:
+        paquetes_db_list = await collection_client_packages.find({
+            "paquete_id": {"$in": list(todos_paquete_ids)}
+        }).to_list(None)
+        for p in paquetes_db_list:
+            paquetes_db_map[p["paquete_id"]] = p
+
     def detectar_formato(c: dict) -> str:
         servicios_arr = c.get("servicios")
         if isinstance(servicios_arr, list) and len(servicios_arr) > 0:
@@ -2951,11 +3192,15 @@ async def get_citas_estilista(
                     or (servicio_db.get("nombre") if servicio_db else None)
                     or "Servicio sin nombre"
                 )
+
+                paquete_info = _calcular_paquete_info_servicio(serv_item, paquetes_db_map)
+
                 servicios_data.append({
                     "servicio_id":          servicio_id or "",
                     "nombre":               nombre_serv,
                     "precio":               precio,
-                    "precio_personalizado": es_personalizado
+                    "precio_personalizado": es_personalizado,
+                    "paquete":              paquete_info
                 })
 
         elif formato == "antiguo":
@@ -3514,7 +3759,7 @@ async def finalizar_servicio_con_pdf(
     cita_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    if current_user["rol"] not in ["admin_sede", "estilista"]:
+    if current_user["rol"] not in ["admin_sede", "super_admin", "estilista"]:
         raise HTTPException(status_code=403, detail="No tienes permisos para finalizar servicios")
 
     cita = await collection_citas.find_one({"_id": ObjectId(cita_id)})
@@ -3570,6 +3815,58 @@ async def finalizar_servicio_con_pdf(
         }}
     )
 
+    # ── Paquetes de sesiones (compra/canje) ──────────────────────────────────
+    # Este negocio no siempre factura — el paquete tiene que poder nacer o
+    # consumirse acá, no solo al facturar. `procesar_paquete_servicio` es
+    # idempotente: si más adelante SÍ facturan esta misma cita, no vuelve a
+    # crear/descontar nada (ver app.bills.routes.facturar_cita_o_venta).
+    servicios_cita = cita.get("servicios", [])
+    servicios_paquetes_actualizados = False
+    paquete_advertencias = []
+    for servicio_item in servicios_cita:
+        if not (servicio_item.get("paquete_id") or servicio_item.get("comprar_paquete_sesiones")):
+            continue
+        cantidad_item = int(servicio_item.get("cantidad", 1) or 1)
+        subtotal_item = servicio_item.get(
+            "subtotal",
+            round(float(servicio_item.get("precio", 0) or 0) * cantidad_item, 2),
+        )
+        resultado_paquete = await procesar_paquete_servicio(
+            servicio_item=servicio_item,
+            cita_id=cita_id,
+            cliente_id=cita.get("cliente_id"),
+            sede_id=cita.get("sede_id"),
+            moneda_sede=sede.get("moneda", "COP"),
+            profesional_id=cita.get("profesional_id"),
+            usuario_email=current_user.get("email"),
+            subtotal=subtotal_item,
+            origen_tipo="cita",
+            abono_origen=cita.get("abono", 0),
+            historial_pagos_origen=cita.get("historial_pagos"),
+        )
+        if resultado_paquete and resultado_paquete.get("ok"):
+            servicio_item["numero_sesion"] = resultado_paquete.get("numero_sesion")
+            # Necesario también para "comprar" (el request no trae paquete_id
+            # porque el paquete todavía no existe) — sin esto la cita origen
+            # de una compra no sabría a qué paquete quedó ligada.
+            servicio_item["paquete_id"] = resultado_paquete.get("paquete_id")
+            servicios_paquetes_actualizados = True
+        elif resultado_paquete and not resultado_paquete.get("ok"):
+            # No bloquear la finalización — el servicio ya se prestó. Queda
+            # visible en la respuesta para que el admin lo corrija a mano
+            # (ajustar_paquete, ya existente) en vez de tumbar un servicio
+            # que ya se realizó.
+            paquete_advertencias.append({
+                "servicio_id": servicio_item.get("servicio_id"),
+                "motivo": resultado_paquete.get("motivo"),
+            })
+
+    if servicios_paquetes_actualizados:
+        await collection_citas.update_one(
+            {"_id": ObjectId(cita_id)},
+            {"$set": {"servicios": servicios_cita}},
+        )
+
     # ── Analytics ────────────────────────────────────────────────────────────
     cliente_id = cita.get("cliente_id")
     if cliente_id:
@@ -3592,6 +3889,7 @@ async def finalizar_servicio_con_pdf(
             "estado":       "finalizado",
             "pdf_generado": False,
             "pdf_enviado":  False,
+            "paquete_advertencias": paquete_advertencias,
         }
 
     # ── Hay ficha (obligatoria u opcional) → actualizar estado y generar PDF ──
@@ -3617,6 +3915,7 @@ async def finalizar_servicio_con_pdf(
         "message": "Servicio finalizado correctamente",
         "cita_id": cita_id,
         "estado":  "finalizado",
+        "paquete_advertencias": paquete_advertencias,
         **pdf_result,
     }
 
