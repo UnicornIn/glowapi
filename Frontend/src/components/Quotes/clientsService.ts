@@ -338,6 +338,18 @@ export async function agregarNotaCliente(token: string, clienteId: string, nota:
 // facturar una cita que compra un paquete. Usado en "Nueva Cita" para
 // ofrecer "usar sesión del paquete" cuando el servicio elegido tiene saldo
 // disponible.
+export interface PagoPaquete {
+  fecha: string;
+  monto: number;
+  metodo: string;
+  tipo: "abono_inicial" | "pago_completo" | "pago_adicional";
+  registrado_por: string;
+  saldo_despues: number;
+  notas?: string | null;
+  corregido_por?: string;
+  corregido_en?: string;
+}
+
 export interface PaqueteCliente {
   paquete_id: string;
   cliente_id: string;
@@ -349,6 +361,14 @@ export interface PaqueteCliente {
   valor_por_sesion: number;
   moneda: string;
   activo: boolean;
+  // Ledger de pago del paquete (Fase 3) — abono es el único campo real
+  // guardado; valor_total/saldo_pendiente/estado_pago los calcula siempre
+  // el backend al vuelo (ver _enriquecer_paquete_con_pago).
+  abono: number;
+  valor_total: number;
+  saldo_pendiente: number;
+  estado_pago: "pendiente" | "abonado" | "pagado";
+  historial_pagos: PagoPaquete[];
 }
 
 export async function getPaquetesCliente(token: string, clienteId: string): Promise<PaqueteCliente[]> {
@@ -368,6 +388,72 @@ export async function getPaquetesCliente(token: string, clienteId: string): Prom
     console.error('❌ Error cargando paquetes del cliente:', error);
     return [];
   }
+}
+
+// Un paquete puntual, con su abono/historial_pagos actuales — usado por la
+// pestaña "Pagos" de una cita ligada a un paquete (a diferencia de
+// getPaquetesCliente, incluye paquetes ya agotados/inactivos).
+export async function getPaquetePorId(token: string, paqueteId: string): Promise<PaqueteCliente | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}clientes/paquetes/${paqueteId}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      credentials: "include",
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (error) {
+    console.error('❌ Error cargando el paquete:', error);
+    return null;
+  }
+}
+
+// Registra un abono/pago contra el PAQUETE completo — se puede llamar
+// desde cualquier cita que pertenezca a ese paquete, todas ven el mismo
+// abonado/historial acumulado (ver Backend: registrar_pago_paquete).
+export async function registrarPagoPaquete(
+  token: string,
+  paqueteId: string,
+  pagoData: { monto: number; metodo: string; notas?: string },
+): Promise<PaqueteCliente> {
+  const res = await fetch(`${API_BASE_URL}clientes/paquetes/${paqueteId}/pago`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(pagoData),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.detail || 'Error al registrar el pago del paquete');
+  }
+  return await res.json();
+}
+
+// Corrige un pago ya registrado contra un paquete (índice en su propio
+// historial_pagos) — mismo criterio que corregirPago de citas.
+export async function corregirPagoPaquete(
+  token: string,
+  paqueteId: string,
+  indice: number,
+  cambios: { metodo?: string; monto?: number },
+): Promise<PaqueteCliente> {
+  const res = await fetch(`${API_BASE_URL}clientes/paquetes/${paqueteId}/pagos/${indice}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(cambios),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.detail || 'Error al corregir el pago del paquete');
+  }
+  return await res.json();
 }
 
 // 🔥 OBTENER HISTORIAL DE CLIENTE

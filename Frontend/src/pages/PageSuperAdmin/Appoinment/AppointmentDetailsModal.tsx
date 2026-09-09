@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import Modal from "../../../components/ui/modal";
 import { useAuth } from "../../../components/Auth/AuthContext";
-import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, cancelarCita, eliminarCita, corregirPago, ApiRequestError } from "./citasApi";
+import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, cancelarCita, eliminarCita, finalizarCita, corregirPago, ApiRequestError } from "./citasApi";
 import { formatDateDMY } from "../../../lib/dateFormat";
 import {
   getServicios,
@@ -35,6 +35,13 @@ import {
   getEstilistas,
   type Estilista,
 } from "../../../components/Professionales/estilistasApi";
+import {
+  getPaquetesCliente,
+  getPaquetePorId,
+  registrarPagoPaquete,
+  corregirPagoPaquete,
+  type PaqueteCliente,
+} from "../../../components/Quotes/clientsService";
 import { API_BASE_URL } from "../../../types/config";
 import type { Cliente } from "../../../types/cliente";
 import TimeInputWithPicker from "../../../components/ui/time-input-with-picker";
@@ -121,6 +128,14 @@ interface ServicioSeleccionado {
   subtotal: number;
   precio_personalizado: number | null;
   usa_precio_personalizado: boolean;
+  // Paquete de sesiones (ver AppointmentForm.tsx, mismo mecanismo) — si se
+  // está canjeando una sesión de un paquete ya comprado (paquete_id) o
+  // comprando uno nuevo (comprar_paquete_sesiones), mutuamente excluyentes.
+  // numero_sesion es un hecho histórico ya estampado por el backend una vez
+  // consumida la sesión (cita finalizada) — no se edita desde acá.
+  paquete_id?: string | null;
+  comprar_paquete_sesiones?: number | null;
+  numero_sesion?: number | null;
 }
 
 interface ServicioDisponible {
@@ -128,6 +143,7 @@ interface ServicioDisponible {
   nombre: string;
   precio: number;
   duracion_minutos: number;
+  paquetes_sesiones?: { sesiones: number; precio: number }[];
 }
 
 interface ProductoDisponible {
@@ -339,6 +355,9 @@ const normalizarServiciosCita = (
         subtotal: roundMoney(subtotalRaw),
         precio_personalizado: usaPrecioPersonalizado ? precioUnitario : null,
         usa_precio_personalizado: usaPrecioPersonalizado,
+        paquete_id: servicio.paquete_id ?? null,
+        comprar_paquete_sesiones: servicio.comprar_paquete_sesiones ?? null,
+        numero_sesion: servicio.numero_sesion ?? null,
       };
     });
 };
@@ -350,6 +369,8 @@ const normalizarComparacionServicios = (servicios: ServicioSeleccionado[]) => {
       cantidad: servicio.cantidad,
       precio_unitario: roundMoney(servicio.precio_unitario),
       usa_precio_personalizado: servicio.usa_precio_personalizado,
+      paquete_id: servicio.paquete_id ?? null,
+      comprar_paquete_sesiones: servicio.comprar_paquete_sesiones ?? null,
     }))
     .sort((a, b) => a.servicio_id.localeCompare(b.servicio_id));
 };
@@ -486,6 +507,11 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   const [serviciosDisponibles, setServiciosDisponibles] = useState<
     ServicioDisponible[]
   >([]);
+  // Paquetes de sesiones activos del cliente de esta cita — para poder
+  // ofrecer "usar sesión del paquete X" / "comprar paquete de N sesiones"
+  // al EDITAR servicios, mismo mecanismo que ya existe al crear la cita
+  // (AppointmentForm.tsx).
+  const [paquetesCliente, setPaquetesCliente] = useState<PaqueteCliente[]>([]);
   const [serviciosSeleccionados, setServiciosSeleccionados] = useState<
     ServicioSeleccionado[]
   >([]);
@@ -694,6 +720,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                 toNumber(servicio.duracion_minutos ?? servicio.duracion) || 0,
               ),
             ),
+            paquetes_sesiones: servicio.paquetes_sesiones,
           }))
           .sort((a, b) => a.nombre.localeCompare(b.nombre));
 
@@ -719,6 +746,58 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       isCancelled = true;
     };
   }, [open, user?.access_token]);
+
+  useEffect(() => {
+    if (!open || !user?.access_token) return;
+    const clienteId =
+      appointmentDetails?.rawData?.cliente_id ||
+      appointmentDetails?.rawData?.client_id;
+    if (!clienteId) {
+      setPaquetesCliente([]);
+      return;
+    }
+
+    let isCancelled = false;
+    getPaquetesCliente(user.access_token, clienteId)
+      .then((paquetes) => {
+        if (!isCancelled) setPaquetesCliente(paquetes);
+      })
+      .catch(() => {
+        if (!isCancelled) setPaquetesCliente([]);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [open, user?.access_token, appointmentDetails?.rawData?.cliente_id, appointmentDetails?.rawData?.client_id]);
+
+  // Paquete de sesiones ligado a esta cita (si alguna línea de servicio
+  // quedó con paquete_id — ya sea porque redimió una sesión, o porque esta
+  // misma cita fue la que compró el paquete) — cuando existe, la pestaña
+  // "Pagos" deja de mostrar el registro de ESTA cita sola y en cambio
+  // lee/escribe el del PAQUETE completo, así cualquier sesión del mismo
+  // paquete ve el mismo abonado/historial (ver Fase 3 del plan de paquetes).
+  const [paqueteVinculado, setPaqueteVinculado] = useState<PaqueteCliente | null>(null);
+  const paqueteIdVinculado: string | null = Array.isArray(
+    appointmentDetails?.rawData?.servicios,
+  )
+    ? appointmentDetails.rawData.servicios.find((s: any) => s?.paquete_id)
+        ?.paquete_id || null
+    : null;
+
+  useEffect(() => {
+    if (!open || !user?.access_token || !paqueteIdVinculado) {
+      setPaqueteVinculado(null);
+      return;
+    }
+    let isCancelled = false;
+    getPaquetePorId(user.access_token, paqueteIdVinculado).then((paquete) => {
+      if (!isCancelled) setPaqueteVinculado(paquete);
+    });
+    return () => {
+      isCancelled = true;
+    };
+  }, [open, user?.access_token, paqueteIdVinculado]);
 
   const handleVerPerfil = useCallback(async () => {
     const clienteId =
@@ -1128,6 +1207,45 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   ]);
 
   const getPagosData = () => {
+    // Cita ligada a un paquete de sesiones: la pestaña "Pagos" muestra y
+    // registra contra el PAQUETE, no contra esta cita puntual — así,
+    // abrir cualquier sesión del mismo paquete muestra el mismo abonado e
+    // historial acumulado (ver Fase 3 del plan de paquetes de sesiones).
+    if (paqueteVinculado) {
+      const pagosPaquete = (paqueteVinculado.historial_pagos || [])
+        .map((pago, indiceOriginal) => ({
+          indiceOriginal,
+          fecha: formatDateDMY(pago.fecha, ""),
+          tipo:
+            pago.tipo === "abono_inicial"
+              ? "Abono inicial"
+              : pago.tipo === "pago_adicional"
+                ? "Pago adicional"
+                : pago.tipo === "pago_completo"
+                  ? "Pago completo"
+                  : pago.tipo || "Pago",
+          monto: pago.monto ?? 0,
+          metodo: pago.metodo || "",
+          registradoPor: pago.registrado_por || "",
+          saldoDespues: pago.saldo_despues ?? 0,
+          notas: pago.notas || null,
+          codigoGiftcard: null,
+        }))
+        .filter((pago) => (pago.monto ?? 0) > 0);
+
+      return {
+        totalCita: paqueteVinculado.valor_total,
+        abonado: paqueteVinculado.abono,
+        saldoPendiente: paqueteVinculado.saldo_pendiente,
+        estadoPago: paqueteVinculado.estado_pago,
+        tieneAbono: paqueteVinculado.abono > 0,
+        estaPagadoCompleto: paqueteVinculado.saldo_pendiente <= 0,
+        pagos: pagosPaquete,
+        esPagoDePaquete: true as const,
+        nombrePaquete: paqueteVinculado.nombre_servicio,
+      };
+    }
+
     if (!appointmentDetails?.rawData) {
       return {
         totalCita: 0,
@@ -1295,6 +1413,57 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
     }
   };
 
+  // Estados desde los que tiene sentido finalizar el servicio — lo normal
+  // es que lo haga el profesional desde su propia app, este botón es para
+  // cuando el admin necesita hacerlo directamente (ej. el profesional no
+  // lo hizo, o no tiene acceso en ese momento). "confirmada" cubre tanto
+  // una cita agendada como una "en curso" — el backend no distingue esos
+  // dos casos como estados separados, "en curso" es solo una etiqueta
+  // visual del frontend calculada por horario (ver resolveRFStatus).
+  const puedeFinalizarse =
+    (appointmentDetails?.estado || "").toLowerCase() === "confirmada";
+
+  const handleFinalizarCita = async () => {
+    if (!appointmentDetails?.id || !user?.access_token) return;
+
+    const confirmed = await confirmAction({
+      title: "Finalizar servicio",
+      message: "Se marcará la cita como finalizada. Si algún servicio es un paquete de sesiones, se crea o descuenta automáticamente.",
+      confirmLabel: "Sí, finalizar",
+      variant: "primary",
+    });
+    if (!confirmed) return;
+
+    setUpdating(true);
+    try {
+      const resultado = await finalizarCita(appointmentDetails.id, user.access_token);
+
+      setAppointmentDetails((prev: any) => ({
+        ...prev,
+        estado: "finalizado",
+        rawData: { ...(prev?.rawData || {}), estado: "finalizado" },
+      }));
+
+      const advertencias = resultado?.paquete_advertencias || [];
+      if (advertencias.length > 0) {
+        toast.warning(
+          `Cita finalizada, pero un paquete de sesiones no se pudo actualizar (${advertencias.map((a: any) => a.motivo).join(", ")}). Revísalo en el perfil del cliente.`,
+        );
+      } else {
+        toast.success("Cita finalizada correctamente");
+      }
+
+      if (onRefresh) {
+        setTimeout(() => onRefresh(), 500);
+      }
+    } catch (error: any) {
+      console.error("Error finalizando cita:", error);
+      toast.error(extraerMensajeError(error, "No se pudo finalizar la cita"));
+    } finally {
+      setUpdating(false);
+    }
+  };
+
   const ESTADOS_ELIMINABLES = ["cancelada", "no asistio", "no_asistio", "pre_reservada"];
 
   const handleEliminarCita = async () => {
@@ -1340,7 +1509,9 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   const handleGuardarMetodoPago = async (indiceOriginal: number) => {
     if (!appointmentDetails?.id || !user?.access_token) return;
 
-    const original = appointmentDetails?.rawData?.historial_pagos?.[indiceOriginal];
+    const original = paqueteVinculado
+      ? paqueteVinculado.historial_pagos?.[indiceOriginal]
+      : appointmentDetails?.rawData?.historial_pagos?.[indiceOriginal];
     const montoNumero = Number(montoEditado);
     if (!montoNumero || montoNumero <= 0) {
       toast.error("El monto debe ser mayor a 0");
@@ -1358,6 +1529,21 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
 
     setGuardandoMetodoPago(true);
     try {
+      // Cita ligada a un paquete: se corrige el pago del PAQUETE, no de
+      // esta cita — ver getPagosData().
+      if (paqueteVinculado) {
+        const paqueteActualizado = await corregirPagoPaquete(
+          user.access_token,
+          paqueteVinculado.paquete_id,
+          indiceOriginal,
+          cambios,
+        );
+        setPaqueteVinculado(paqueteActualizado);
+        toast.success("Pago corregido");
+        setEditandoPagoIdx(null);
+        return;
+      }
+
       const resultado = await corregirPago(appointmentDetails.id, indiceOriginal, cambios, user.access_token);
       toast.success("Pago corregido");
       setEditandoPagoIdx(null);
@@ -1503,6 +1689,15 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       toast.error("Debes ingresar el código de la Gift Card para registrar el pago");
       return;
     }
+    if (
+      paqueteVinculado &&
+      (metodoPagoSeguro === "giftcard" || metodoPagoSeguro === "saldo_a_favor")
+    ) {
+      toast.error(
+        "Un pago del paquete no admite giftcard ni saldo a favor — usa efectivo, transferencia u otro método directo.",
+      );
+      return;
+    }
     const confirmacion = await confirmAction({
       title: "Registrar pago",
       message: `¿Registrar ${pagoModal.tipo === "pago" ? "pago" : "abono"} de $${pagoModal.monto} por ${metodoPagoSeguro}?`,
@@ -1514,6 +1709,28 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
 
     setRegistrandoPago(true);
     try {
+      // Cita ligada a un paquete: el pago se registra contra el PAQUETE
+      // completo, no contra esta cita — ver getPagosData().
+      if (paqueteVinculado) {
+        const paqueteActualizado = await registrarPagoPaquete(
+          user.access_token,
+          paqueteVinculado.paquete_id,
+          { monto: pagoModal.monto, metodo: metodoPagoSeguro },
+        );
+        setPaqueteVinculado(paqueteActualizado);
+        toast.success(
+          `${pagoModal.tipo === "pago" ? "Pago" : "Abono"} registrado exitosamente`,
+        );
+        setPagoModal({
+          show: false,
+          tipo: "pago",
+          monto: 0,
+          metodoPago: "efectivo",
+          codigoGiftcard: "",
+        });
+        return;
+      }
+
       const response = await registrarPagoCita(
         appointmentDetails.id,
         {
@@ -1679,6 +1896,80 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
     );
   };
 
+  // Paquete de sesiones activo (con saldo) que cubre este servicio, si
+  // existe — mismo mecanismo que AppointmentForm.tsx ("Nueva Cita"), pero
+  // acá se ofrece también al EDITAR servicios de una cita ya creada
+  // (incluidas ya finalizadas — ver editar_cita en el backend).
+  const findPaqueteParaServicio = useCallback(
+    (servicioId: string) =>
+      paquetesCliente.find(
+        (p) => p.servicio_id === servicioId && p.activo && p.sesiones_restantes > 0,
+      ),
+    [paquetesCliente],
+  );
+
+  // Selector unificado "cómo se cobra esta línea": precio normal, canjear
+  // una sesión de un paquete ya comprado, o comprar un paquete nuevo. El
+  // valor codifica la elección: "normal" | "canjear" | "comprar:<sesiones>".
+  const handleCambiarModoPaquete = (servicioId: string, modo: string) => {
+    setServiciosSeleccionados((prev) =>
+      prev.map((servicio) => {
+        if (servicio.servicio_id !== servicioId) return servicio;
+
+        if (modo === "canjear") {
+          const paquete = findPaqueteParaServicio(servicioId);
+          if (!paquete) return servicio;
+          // Ya pagado al comprar el paquete — esta sesión no se cobra de nuevo.
+          return {
+            ...servicio,
+            paquete_id: paquete.paquete_id,
+            comprar_paquete_sesiones: null,
+            precio_personalizado: null,
+            usa_precio_personalizado: false,
+            precio_unitario: 0,
+            precio_unitario_input: "0",
+            subtotal: 0,
+          };
+        }
+
+        if (modo.startsWith("comprar:")) {
+          const sesiones = parseInt(modo.split(":")[1], 10);
+          const servicioCompleto = serviciosDisponibles.find(
+            (sv) => sv.servicio_id === servicioId,
+          );
+          const tier = servicioCompleto?.paquetes_sesiones?.find(
+            (t) => t.sesiones === sesiones,
+          );
+          if (!tier) return servicio;
+          // Se cobra el paquete completo (no se multiplica por cantidad —
+          // el "paquete" es la línea completa, igual que en AppointmentForm.tsx).
+          return {
+            ...servicio,
+            paquete_id: null,
+            comprar_paquete_sesiones: sesiones,
+            precio_personalizado: null,
+            usa_precio_personalizado: false,
+            precio_unitario: tier.precio,
+            precio_unitario_input: String(tier.precio),
+            subtotal: tier.precio,
+          };
+        }
+
+        // "normal": vuelve al precio base del servicio.
+        return {
+          ...servicio,
+          paquete_id: null,
+          comprar_paquete_sesiones: null,
+          precio_unitario: servicio.precio_base,
+          precio_unitario_input: String(servicio.precio_base),
+          precio_personalizado: null,
+          usa_precio_personalizado: false,
+          subtotal: roundMoney(servicio.precio_base * servicio.cantidad),
+        };
+      }),
+    );
+  };
+
   const handleEliminarProducto = (productoId: string) => {
     setProductos((prev) =>
       prev.filter((producto) => producto.producto_id !== productoId),
@@ -1838,6 +2129,11 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
         servicio_id: servicio.servicio_id,
         precio: roundMoney(toNumber(servicio.precio_unitario_input)),
         cantidad: servicio.cantidad,
+        // Paquetes de sesiones — se manda explícito siempre (incluso null)
+        // para que el backend sepa que es un valor real y no "sin tocar";
+        // ver editar_cita: si la clave no viniera, preserva lo anterior.
+        paquete_id: servicio.paquete_id ?? null,
+        comprar_paquete_sesiones: servicio.comprar_paquete_sesiones ?? null,
       }));
       const productosPayload = productos.map((producto) => ({
         producto_id: producto.producto_id,
@@ -2599,24 +2895,81 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
 
                 {/* Fila secundaria: precio editable */}
                 <div className="flex items-center gap-1.5 mt-1.5 pl-0">
-                  <span className="text-xs text-slate-400">$</span>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    pattern="[0-9]*[.,]?[0-9]*"
-                    value={servicio.precio_unitario_input}
-                    onChange={(e) =>
-                      handleActualizarPrecioServicio(
-                        servicio.servicio_id,
-                        e.target.value,
-                      )
-                    }
-                    disabled={isServiceActionsDisabled}
-                    className="w-24 border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-600 outline-none focus:border-slate-400 disabled:bg-transparent disabled:border-transparent transition-colors"
-                    placeholder="0"
-                  />
-                  <span className="text-xs text-slate-400">c/u</span>
+                  {servicio.paquete_id ? (
+                    <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-2 py-1">
+                      Cubierto por paquete
+                    </span>
+                  ) : (
+                    <>
+                      <span className="text-xs text-slate-400">$</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        pattern="[0-9]*[.,]?[0-9]*"
+                        value={servicio.precio_unitario_input}
+                        onChange={(e) =>
+                          handleActualizarPrecioServicio(
+                            servicio.servicio_id,
+                            e.target.value,
+                          )
+                        }
+                        disabled={isServiceActionsDisabled}
+                        className="w-24 border border-slate-200 rounded-lg px-2 py-1 text-xs text-slate-600 outline-none focus:border-slate-400 disabled:bg-transparent disabled:border-transparent transition-colors"
+                        placeholder="0"
+                      />
+                      <span className="text-xs text-slate-400">c/u</span>
+                    </>
+                  )}
                 </div>
+
+                {/* Paquetes de sesiones — canjear una sesión ya comprada, o
+                    comprar un paquete nuevo de este servicio. Solo aparece
+                    si hay algo que ofrecer (un paquete activo del cliente
+                    para este servicio, o el servicio tiene opciones de
+                    paquete configuradas). */}
+                {(() => {
+                  const paqueteExistente = findPaqueteParaServicio(servicio.servicio_id);
+                  const servicioCompleto = serviciosDisponibles.find(
+                    (sv) => sv.servicio_id === servicio.servicio_id,
+                  );
+                  const tiers = servicioCompleto?.paquetes_sesiones || [];
+                  if (!paqueteExistente && tiers.length === 0 && !servicio.paquete_id) {
+                    return null;
+                  }
+                  const modoActual = servicio.paquete_id
+                    ? "canjear"
+                    : servicio.comprar_paquete_sesiones
+                      ? `comprar:${servicio.comprar_paquete_sesiones}`
+                      : "normal";
+                  return (
+                    <select
+                      value={modoActual}
+                      onChange={(e) =>
+                        handleCambiarModoPaquete(servicio.servicio_id, e.target.value)
+                      }
+                      disabled={isServiceActionsDisabled}
+                      className="w-full mt-1.5 border border-slate-200 rounded-lg px-2 py-1 text-[11px] text-slate-600 outline-none focus:border-slate-400 disabled:opacity-50"
+                    >
+                      <option value="normal">Precio normal (${servicio.precio_base})</option>
+                      {paqueteExistente && (
+                        <option value="canjear">
+                          Usar sesión del paquete (quedan {paqueteExistente.sesiones_restantes} de {paqueteExistente.sesiones_totales})
+                        </option>
+                      )}
+                      {tiers.map((t) => (
+                        <option key={t.sesiones} value={`comprar:${t.sesiones}`}>
+                          Comprar paquete de {t.sesiones} sesiones — ${t.precio}
+                        </option>
+                      ))}
+                    </select>
+                  );
+                })()}
+
+                {typeof servicio.numero_sesion === "number" && (
+                  <p className="mt-1 text-[10px] text-purple-600">
+                    Sesión {servicio.numero_sesion} consumida del paquete
+                  </p>
+                )}
               </div>
             ))}
           </div>
@@ -3446,6 +3799,19 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                   {/* ─ TAB: PAGOS ────────────────────────────────────────── */}
                   {activeTab === "pagos" && (
                     <>
+                      {pagosData.esPagoDePaquete && (
+                        <div
+                          className="rounded-xl p-3 text-xs"
+                          style={{ background: "#F5F3FF", color: "#6D28D9" }}
+                        >
+                          Esta sesión pertenece al paquete "
+                          {pagosData.nombrePaquete || "de sesiones"}". El
+                          abonado y el historial de abajo son del paquete
+                          completo — registrar o corregir un pago acá lo
+                          actualiza sin importar desde cuál sesión se abra.
+                        </div>
+                      )}
+
                       {/* Summary cards */}
                       <div className="grid grid-cols-3 gap-2">
                         <div
@@ -3937,6 +4303,21 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                       }}
                     >
                       Cerrar
+                    </button>
+                  )}
+
+                  {puedeFinalizarse && (
+                    <button
+                      onClick={handleFinalizarCita}
+                      disabled={updating}
+                      className="flex-1 flex items-center justify-center py-3 rounded-xl text-sm font-semibold disabled:opacity-50"
+                      style={{
+                        border: "1px solid #6EE7B7",
+                        color: "#059669",
+                        background: "#ECFDF5",
+                      }}
+                    >
+                      Finalizar
                     </button>
                   )}
 

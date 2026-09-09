@@ -167,6 +167,25 @@ export const cancelarCita = async (citaId: string, token: string) => {
   return await response.json();
 };
 
+// Finalizar el servicio desde el admin — mismo endpoint que ya usa la
+// vista del profesional (attention-protocol.tsx). Marca la cita como
+// "finalizado", genera/envía el PDF de la ficha si corresponde, y procesa
+// cualquier paquete de sesiones de la cita (crea/redime — ver
+// app.scheduling.submodules.quotes.paquetes_helpers en el backend). El
+// admin puede necesitarlo si el profesional no lo hizo desde su propia app.
+export const finalizarCita = async (citaId: string, token: string) => {
+  const response = await fetch(`${API_BASE_URL}scheduling/quotes/citas/${citaId}/finalizar`, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+
+  if (!response.ok) {
+    throw await buildApiRequestError(response, 'Error al finalizar la cita');
+  }
+
+  return await response.json();
+};
+
 // Eliminación permanente — solo válida para citas ya canceladas o
 // marcadas como "no asistió" (el backend lo re-valida igual).
 export const eliminarCita = async (citaId: string, token: string) => {

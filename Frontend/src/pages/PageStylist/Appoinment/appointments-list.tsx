@@ -58,6 +58,26 @@ const calcularPrecioTotal = (cita: any): number => {
   return valor; // 0 o 1 si no hay datos
 };
 
+// Info del paquete de sesiones que cubre alguno de los servicios de la cita
+// (canjeado al agendar, ver AppointmentForm.tsx, o consumido al finalizar)
+// — antes solo se veía al crear la cita; acá se muestra también después, en
+// la agenda del profesional. `numero_sesion` (cuando existe) es un hecho ya
+// consumido/estampado — se muestra "Sesión N de M" fijo; si todavía no se
+// consumió (cita reservada, aún no finalizada), se muestra "quedan N de M",
+// que sí puede seguir cambiando con otras citas.
+const obtenerInfoPaquete = (
+  cita: any
+): {
+  nombre_servicio?: string;
+  sesiones_restantes?: number;
+  sesiones_totales?: number;
+  numero_sesion?: number;
+} | null => {
+  if (!cita.servicios || !Array.isArray(cita.servicios)) return null;
+  const conPaquete = cita.servicios.find((s: any) => s.paquete);
+  return conPaquete?.paquete || null;
+};
+
 export function AppointmentsList({ 
   appointments, 
   bloqueos, 
@@ -344,6 +364,7 @@ export function AppointmentsList({
           
           // 🔥 Contar cantidad de servicios
           const cantidadServicios = appointment.servicios?.length || 1;
+          const infoPaquete = obtenerInfoPaquete(appointment);
 
           return (
             <div
@@ -385,7 +406,28 @@ export function AppointmentsList({
                       </div>
                     )}
                   </div>
-                  
+
+                  {infoPaquete && (
+                    <div className="mb-2 inline-flex items-center gap-1 rounded-full bg-purple-50 px-2 py-0.5 text-[11px] font-medium text-purple-700">
+                      {infoPaquete.nombre_servicio || "Paquete de sesiones"}
+                      {typeof infoPaquete.numero_sesion === "number" &&
+                      typeof infoPaquete.sesiones_totales === "number" ? (
+                        <span>
+                          {" "}
+                          · Sesión {infoPaquete.numero_sesion} de {infoPaquete.sesiones_totales}
+                        </span>
+                      ) : (
+                        typeof infoPaquete.sesiones_restantes === "number" &&
+                        typeof infoPaquete.sesiones_totales === "number" && (
+                          <span>
+                            {" "}
+                            · quedan {infoPaquete.sesiones_restantes} de {infoPaquete.sesiones_totales}
+                          </span>
+                        )
+                      )}
+                    </div>
+                  )}
+
                   <div className="mb-2">
                     <div
                       className={`truncate text-xs font-medium ${

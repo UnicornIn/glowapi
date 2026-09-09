@@ -169,6 +169,27 @@ const getFirstNonEmptyText = (...values: unknown[]): string => {
   return "";
 };
 
+// Texto corto "(Sesión N de M)" para el bloque de la agenda cuando la cita
+// pertenece a un paquete de sesiones — ver `paquete` que el backend agrega
+// a cada línea de `servicios` (routes_quotes.py, _calcular_paquete_info_servicio).
+// N puede ser una sesión ya consumida (estable) o una predicción (sesión 1
+// de una compra nueva que todavía no se finalizó) — ambos casos vienen
+// resueltos desde el backend, acá solo se formatea.
+const getInfoSesionPaquete = (apt: { rawData?: any }): string => {
+  const servicios = apt.rawData?.servicios;
+  if (!Array.isArray(servicios)) return "";
+  const conPaquete = servicios.find((s: any) => s?.paquete);
+  const paquete = conPaquete?.paquete;
+  if (!paquete) return "";
+  if (
+    typeof paquete.numero_sesion === "number" &&
+    typeof paquete.sesiones_totales === "number"
+  ) {
+    return `Sesión ${paquete.numero_sesion} de ${paquete.sesiones_totales}`;
+  }
+  return "";
+};
+
 const extractClientName = (cita: any): string => {
   const nestedNombre = getFirstNonEmptyText(
     cita?.cliente?.nombre,
@@ -1243,19 +1264,21 @@ const CalendarScheduler: React.FC = () => {
 
   const handleCitaCreada = useCallback(() => {
     console.log("🔄 Recargando citas después de crear nueva cita...");
-    cargarCitas();
+    // No llamar cargarCitas() acá directo — el bump de refreshTrigger ya
+    // dispara el mismo cargarCitas() vía el useEffect de arriba. Llamar
+    // ambos disparaba dos GETs concurrentes por cada guardado, la causa
+    // real del "servicio duplicado" reportado en la agenda al editar.
     cargarEstilistas();
     setRefreshTrigger((prev) => prev + 1);
     handleClose();
-  }, [cargarCitas, cargarEstilistas, handleClose]);
+  }, [cargarEstilistas, handleClose]);
 
   const handleBloqueoCreado = useCallback(() => {
-    cargarCitas();
     cargarEstilistas();
     cargarBloqueos();
     setRefreshTrigger((prev) => prev + 1);
     handleClose();
-  }, [cargarCitas, cargarEstilistas, cargarBloqueos, handleClose]);
+  }, [cargarEstilistas, cargarBloqueos, handleClose]);
 
   const handleConfirmarEliminarBloqueo = useCallback(async () => {
     if (!bloqueoAEliminar || !user?.access_token) return;
@@ -1593,9 +1616,13 @@ const CalendarScheduler: React.FC = () => {
     const clienteNombre = shortName(
       getTextValue(apt.cliente_nombre) || "(Sin nombre)",
     );
-    const serviceText =
+    const serviceTextBase =
       getFirstNonEmptyText(apt.servicios_resumen, apt.servicio_nombre) ||
       "(Sin servicio)";
+    const infoSesion = getInfoSesionPaquete(apt);
+    const serviceText = infoSesion
+      ? `${serviceTextBase} (${infoSesion})`
+      : serviceTextBase;
 
     const [sh, sm] = apt.start.split(":").map(Number);
     const [eh, em] = apt.end.split(":").map(Number);
@@ -2387,7 +2414,10 @@ const CalendarScheduler: React.FC = () => {
             onClose={closeDetailPanel}
             appointment={selectedAppointment}
             onRefresh={() => {
-              cargarCitas();
+              // Solo el bump — cargarCitas() ya se dispara vía el useEffect
+              // que depende de refreshTrigger (línea ~683). Llamarlo también
+              // acá directo duplicaba el GET justo después de guardar
+              // servicios, la causa real del "servicio duplicado" en agenda.
               setRefreshTrigger((prev) => prev + 1);
             }}
             panelMode={true}

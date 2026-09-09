@@ -109,6 +109,27 @@ const shortName = (name: string): string =>
 const formatCOP = (amount: number): string =>
   '$' + Math.round(amount).toLocaleString('es-CO');
 
+// Texto corto "(Sesión N de M)" para el bloque de la agenda cuando la cita
+// pertenece a un paquete de sesiones — ver `paquete` que el backend agrega
+// a cada línea de `servicios` (routes_quotes.py, _calcular_paquete_info_servicio).
+// N puede ser una sesión ya consumida (estable) o una predicción (sesión 1
+// de una compra nueva que todavía no se finalizó) — ambos casos vienen
+// resueltos desde el backend, acá solo se formatea.
+const getInfoSesionPaquete = (apt: { rawData?: any }): string => {
+  const servicios = apt.rawData?.servicios;
+  if (!Array.isArray(servicios)) return "";
+  const conPaquete = servicios.find((s: any) => s?.paquete);
+  const paquete = conPaquete?.paquete;
+  if (!paquete) return "";
+  if (
+    typeof paquete.numero_sesion === "number" &&
+    typeof paquete.sesiones_totales === "number"
+  ) {
+    return `Sesión ${paquete.numero_sesion} de ${paquete.sesiones_totales}`;
+  }
+  return "";
+};
+
 const hourLabelFromStr = (hourStr: string): string => {
   const h = parseInt(hourStr.split(':')[0], 10);
   const d = h > 12 ? h - 12 : h;
@@ -1143,7 +1164,11 @@ const CalendarScheduler: React.FC = () => {
     const hasAbono  = abonado > 0 && !isPaid;
 
     const clienteNombre = shortName(apt.cliente_nombre || '(Sin nombre)');
-    const serviceText   = apt.servicio_nombre || '(Sin servicio)';
+    const serviceTextBase = apt.servicio_nombre || '(Sin servicio)';
+    const infoSesion = getInfoSesionPaquete(apt);
+    const serviceText = infoSesion
+      ? `${serviceTextBase} (${infoSesion})`
+      : serviceTextBase;
 
     const [sh, sm] = apt.start.split(':').map(Number);
     const [eh, em] = apt.end.split(':').map(Number);

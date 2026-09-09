@@ -65,6 +65,7 @@ interface Appointment {
   valor_total?: number
   estado_pago?: string
   estado_factura?: string
+  numero_comprobante?: string
   abono?: number
   saldo_pendiente?: number
   historial_pagos?: Array<{
@@ -469,6 +470,24 @@ export default function SuperAdminBilling() {
 
   const handleOpenFactura = (a: Appointment, e: React.MouseEvent) => {
     e.stopPropagation()
+
+    // Cita de una sesión de paquete que quedó "Facturada" por propagación
+    // (ver Backend: facturar_cita_o_venta) — no tiene su propia factura,
+    // comparte la de la cita que compró el paquete. Matchear por
+    // numero_comprobante es exacto; el fallback de fecha+cliente+total de
+    // abajo fallaría acá porque cada sesión tiene su propia fecha y esta
+    // línea vale $0.
+    if (a.numero_comprobante) {
+      const porComprobante = cachedFacturas.find(
+        (f) => f.numero_comprobante === a.numero_comprobante,
+      )
+      if (porComprobante) {
+        setSelectedFactura(porComprobante)
+        setShowFacturaModal(true)
+        return
+      }
+    }
+
     const appointmentDate = getAppointmentDate(a)
     const clientName = (a.cliente_nombre || a.cliente || "").trim().toLowerCase()
     const total = a.valor_total || a.precio_total || 0
