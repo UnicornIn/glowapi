@@ -358,6 +358,14 @@ export interface PaqueteCliente {
   sesiones_totales: number;
   sesiones_usadas: number;
   sesiones_restantes: number;
+  // Citas ya agendadas con el paquete que aún no se finalizan (reservan cupo)
+  sesiones_agendadas?: number;
+  // restantes - agendadas: lo que todavía se puede asignar a una cita nueva
+  sesiones_disponibles?: number;
+  // Cita que compró el paquete — desde ahí se factura el paquete completo
+  cita_origen_id?: string | null;
+  // Factura que cubre el paquete (si ya se facturó)
+  facturacion?: { numero_comprobante?: string; fecha_facturacion?: string; cita_id?: string } | null;
   valor_por_sesion: number;
   moneda: string;
   activo: boolean;
@@ -368,7 +376,30 @@ export interface PaqueteCliente {
   valor_total: number;
   saldo_pendiente: number;
   estado_pago: "pendiente" | "abonado" | "pagado";
+  // Solo pagos antiguos que quedaron guardados en el paquete sin sesión.
   historial_pagos: PagoPaquete[];
+  // Todos los pagos del paquete (los de cada sesión + los sin sesión), por fecha.
+  pagos?: PagoConsolidadoPaquete[];
+}
+
+export interface PagoConsolidadoPaquete {
+  fecha: string;
+  monto: number;
+  metodo: string;
+  tipo: string;
+  registrado_por?: string;
+  notas?: string | null;
+  // "cita": guardado en una sesión (visible en caja). "paquete": solo en el paquete.
+  origen: "cita" | "paquete";
+  indice: number;
+  en_caja: boolean;
+  cita_id?: string;
+  fecha_cita?: string;
+  hora_cita?: string;
+  numero_sesion?: number | null;
+  es_origen?: boolean;
+  estado_cita?: string;
+  cita_facturada?: boolean;
 }
 
 export async function getPaquetesCliente(token: string, clienteId: string): Promise<PaqueteCliente[]> {
@@ -416,7 +447,8 @@ export async function getPaquetePorId(token: string, paqueteId: string): Promise
 export async function registrarPagoPaquete(
   token: string,
   paqueteId: string,
-  pagoData: { monto: number; metodo: string; notas?: string },
+  // cita_id: sesión donde se recibe el pago — queda guardado en esa cita (caja lo ve)
+  pagoData: { monto: number; metodo: string; notas?: string; cita_id: string },
 ): Promise<PaqueteCliente> {
   const res = await fetch(`${API_BASE_URL}clientes/paquetes/${paqueteId}/pago`, {
     method: 'POST',
@@ -454,6 +486,122 @@ export async function corregirPagoPaquete(
     throw new Error(errorData?.detail || 'Error al corregir el pago del paquete');
   }
   return await res.json();
+}
+
+// Pasa un pago que quedó solo en el paquete a una de sus sesiones (desde ahí caja lo ve).
+export async function moverPagoPaqueteASesion(
+  token: string,
+  paqueteId: string,
+  indice: number,
+  citaId: string,
+): Promise<PaqueteCliente> {
+  return _postJson(
+    `${API_BASE_URL}clientes/paquetes/${paqueteId}/pagos/${indice}/mover`,
+    token,
+    { cita_id: citaId },
+    'Error al pasar el pago a la sesión',
+  );
+}
+
+// Descarta un pago que quedó solo en el paquete por ser duplicado de uno de una sesión.
+export async function descartarPagoPaquete(
+  token: string,
+  paqueteId: string,
+  indice: number,
+  motivo: string,
+): Promise<PaqueteCliente> {
+  const res = await fetch(
+    `${API_BASE_URL}clientes/paquetes/${paqueteId}/pagos/${indice}?motivo=${encodeURIComponent(motivo)}`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.detail || 'Error al descartar el pago');
+  }
+  return await res.json();
+}
+
+// ── Sesiones de un paquete (citas ligadas + citas sueltas del mismo servicio) ──
+export interface SesionPaquete {
+  cita_id: string;
+  numero_sesion: number | null;
+  fecha: string;
+  hora_inicio: string;
+  hora_fin: string;
+  estado: string;
+  estado_factura?: string | null;
+  numero_comprobante?: string | null;
+  profesional_nombre?: string;
+  valor_total: number;
+  abono: number;
+  // consumida = finalizada/facturada; agendada = reserva cupo; no_cuenta = cancelada/no asistió
+  cuenta: "consumida" | "agendada" | "no_cuenta";
+  es_origen: boolean;
+  cita: any;
+}
+
+export interface SesionesPaqueteResponse {
+  paquete: PaqueteCliente;
+  resumen: {
+    sesiones_totales: number;
+    sesiones_usadas: number;
+    sesiones_agendadas: number;
+    sesiones_restantes: number;
+    sesiones_disponibles: number;
+    sobrecupo: number;
+  };
+  sesiones: SesionPaquete[];
+  sin_asociar: SesionPaquete[];
+}
+
+const _postJson = async (url: string, token: string, body: unknown, fallback: string) => {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.detail || fallback);
+  }
+  return await res.json();
+};
+
+export async function getSesionesPaquete(token: string, paqueteId: string): Promise<SesionesPaqueteResponse> {
+  const res = await fetch(`${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/sesiones`, {
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.detail || 'Error al cargar las sesiones del paquete');
+  }
+  return await res.json();
+}
+
+export async function asociarCitaPaquete(
+  token: string,
+  citaId: string,
+  paqueteId: string,
+): Promise<{ mensaje: string; advertencias: string[] }> {
+  return _postJson(
+    `${API_BASE_URL}scheduling/quotes/${citaId}/asociar-paquete`,
+    token,
+    { paquete_id: paqueteId },
+    'Error al asociar la cita al paquete',
+  );
+}
+
+export async function desasociarCitaPaquete(
+  token: string,
+  citaId: string,
+  paqueteId: string,
+): Promise<{ mensaje: string }> {
+  return _postJson(
+    `${API_BASE_URL}scheduling/quotes/${citaId}/desasociar-paquete`,
+    token,
+    { paquete_id: paqueteId },
+    'Error al desasociar la cita del paquete',
+  );
 }
 
 // 🔥 OBTENER HISTORIAL DE CLIENTE

@@ -868,6 +868,9 @@ export default function Billing() {
                     .join(" ")
                   const serviceName = a.servicio_nombre || a.servicio || "—"
                   const hasAbono = (a.abono ?? 0) > 0
+                  // Sesión de un paquete ($0): no se factura sola, va con la factura del paquete
+                  const lineaPaquete = (a.servicios as Array<{ paquete_id?: string | null; numero_sesion?: number | null; comprar_paquete_sesiones?: number | null }> | undefined)?.find((s) => s.paquete_id)
+                  const esSesionPaquete = !!lineaPaquete && !lineaPaquete.comprar_paquete_sesiones
 
                   return (
                     <div
@@ -905,7 +908,7 @@ export default function Billing() {
                               : "border-gray-300 text-gray-400"
                           }`}
                         >
-                          {hasAbono ? "Con pago" : "Pendiente"}
+                          {esSesionPaquete ? `Sesión ${lineaPaquete?.numero_sesion ?? ""} paquete` : lineaPaquete ? "Compra paquete" : hasAbono ? "Con pago" : "Pendiente"}
                         </span>
                       </div>
 
@@ -940,7 +943,7 @@ export default function Billing() {
 
                       {/* Value */}
                       <div className="w-24 text-right text-sm font-bold text-gray-900">
-                        {fmtCOP(a.valor_total)}
+                        {esSesionPaquete ? <span className="text-xs font-medium text-gray-400">En paquete</span> : fmtCOP(a.valor_total)}
                       </div>
                     </div>
                   )

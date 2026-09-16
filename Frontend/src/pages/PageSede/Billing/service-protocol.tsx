@@ -22,6 +22,11 @@ import {
   getPaymentMethodLabel,
 } from "../../../lib/payment-methods";
 import { registrarPagoCita } from "../Appoinment/citasApi";
+import {
+  getPaquetePorId,
+  registrarPagoPaquete,
+  type PaqueteCliente,
+} from "../../../components/Quotes/clientsService";
 
 interface Producto {
   _id?: string;
@@ -70,6 +75,9 @@ interface Appointment {
     nombre: string;
     precio: number;
     precio_personalizado?: boolean;
+    paquete_id?: string | null;
+    numero_sesion?: number | null;
+    comprar_paquete_sesiones?: number | null;
   }>;
   precio_total?: number;
   estilista?: string;
@@ -262,9 +270,43 @@ export function ServiceProtocol({
     }, 0);
   }, [selectedProducts, productsQuantities]);
 
+  // ── Paquete de sesiones ─────────────────────────────────────────────────
+  // Un paquete es UNA venta: se factura una sola vez desde la cita que lo
+  // compró, con lo pagado en todas sus sesiones. Una sesión ($0) no se
+  // factura sola — desde acá se factura el paquete completo.
+  const lineaPaquete = selectedAppointment?.servicios?.find((s) => s.paquete_id);
+  const paqueteId = lineaPaquete?.paquete_id || null;
+  const [paquete, setPaquete] = useState<PaqueteCliente | null>(null);
+  const [cargandoPaquete, setCargandoPaquete] = useState(false);
+
+  const recargarPaquete = async () => {
+    const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+    if (!paqueteId || !token) {
+      setPaquete(null);
+      return;
+    }
+    setCargandoPaquete(true);
+    try {
+      setPaquete(await getPaquetePorId(token, paqueteId));
+    } finally {
+      setCargandoPaquete(false);
+    }
+  };
+
+  useEffect(() => {
+    void recargarPaquete();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paqueteId, selectedAppointment?._id]);
+
+  const esCompraPaquete = !!paquete && paquete.cita_origen_id === selectedAppointment?._id;
+  const esSesionPaquete = !!paquete && !esCompraPaquete;
+  const paqueteFacturado = !!paquete?.facturacion;
+
   const totalGeneral = servicioTotal + productosTotal;
-  const totalPagado = selectedAppointment?.abono ?? 0;
-  const saldoPendiente = selectedAppointment?.saldo_pendiente ?? (totalGeneral - totalPagado);
+  const totalPagado = paquete ? paquete.abono : (selectedAppointment?.abono ?? 0);
+  const saldoPendiente = paquete
+    ? paquete.saldo_pendiente
+    : (selectedAppointment?.saldo_pendiente ?? (totalGeneral - totalPagado));
 
   const clientName =
     selectedAppointment?.cliente_nombre || selectedAppointment?.cliente || "No especificado";
@@ -284,7 +326,9 @@ export function ServiceProtocol({
   const estadoPagoLabel = getEstadoPagoLabel(selectedAppointment?.estado_pago);
   const fichaLabel = selectedAppointment?.ficha_realizada ? "Realizada" : "Pendiente";
 
-  const isPagado = selectedAppointment?.estado_pago?.toLowerCase() === "pagado";
+  const isPagado = paquete
+    ? paquete.saldo_pendiente <= 0
+    : selectedAppointment?.estado_pago?.toLowerCase() === "pagado";
 
   // Handlers
   const handleAddProducts = (products: Producto[]) => {
@@ -385,6 +429,18 @@ export function ServiceProtocol({
 
     setRegistrandoPago(true);
     try {
+      if (paquete) {
+        // Queda guardado en esta sesión (caja lo ve hoy) y abona al paquete.
+        const actualizado = await registrarPagoPaquete(token, paquete.paquete_id, {
+          monto,
+          metodo,
+          cita_id: selectedAppointment._id,
+        });
+        setPaquete(actualizado);
+        setPaymentAmount("");
+        toast.success("Pago registrado al paquete");
+        return;
+      }
       const response = await registrarPagoCita(
         selectedAppointment._id,
         { monto, metodo_pago: metodo },
@@ -401,8 +457,8 @@ export function ServiceProtocol({
       onAppointmentUpdated?.(updatedAppointment);
       setPaymentAmount("");
       toast.success("Pago registrado");
-    } catch (error) {
-      toast.error("Error al registrar pago");
+    } catch (error: any) {
+      toast.error(error?.message || "Error al registrar pago");
     } finally {
       setRegistrandoPago(false);
     }
@@ -410,6 +466,8 @@ export function ServiceProtocol({
 
   const handleFacturarCita = async () => {
     if (!selectedAppointment?._id) return;
+    // Desde una sesión se factura la cita que compró el paquete.
+    const idAFacturar = esSesionPaquete && paquete?.cita_origen_id ? paquete.cita_origen_id : selectedAppointment._id;
 
     try {
       setIsFacturando(true);
@@ -422,16 +480,20 @@ export function ServiceProtocol({
         return;
       }
 
-      const currentSaldo = selectedAppointment.saldo_pendiente ??
-        (selectedAppointment.valor_total || 0) - (selectedAppointment.abono || 0);
+      const currentSaldo = paquete
+        ? paquete.saldo_pendiente
+        : selectedAppointment.saldo_pendiente ??
+          (selectedAppointment.valor_total || 0) - (selectedAppointment.abono || 0);
       if (currentSaldo > 0) {
         toast.warning(`Saldo pendiente: $${formatMoney(currentSaldo)}`);
         return;
       }
 
       const confirmedFacturar = await confirmAction({
-        title: "Facturar cita",
-        message: "¿Facturar esta cita?",
+        title: paquete ? "Facturar paquete" : "Facturar cita",
+        message: paquete
+          ? `Se emite UNA factura por el paquete "${paquete.nombre_servicio}" (${formatMoney(paquete.valor_total)}) con todos los pagos de sus sesiones. Las sesiones quedan cubiertas por esa factura.`
+          : "¿Facturar esta cita?",
         confirmLabel: "Sí, facturar",
         variant: "primary",
       });
@@ -446,7 +508,7 @@ export function ServiceProtocol({
       }));
 
       const result = await handleFacturarRequest({
-        id: selectedAppointment._id,
+        id: idAFacturar,
         tipo: "cita",
         token,
         productos: productosParaFacturar,
@@ -467,8 +529,8 @@ export function ServiceProtocol({
         saldo_pendiente: 0,
       };
       onAppointmentUpdated?.(updatedAppointment);
-    } catch (error) {
-      toast.error("Error al facturar");
+    } catch (error: any) {
+      toast.error(error?.message || "Error al facturar", { duration: 8000 });
     } finally {
       setIsFacturando(false);
     }
@@ -708,20 +770,74 @@ export function ServiceProtocol({
             </div>
           </div>
 
+          {/* PAQUETE DE SESIONES */}
+          {paqueteId && (
+            <div className="px-6 py-4 border-b border-gray-200">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+                Paquete de sesiones
+              </p>
+              {cargandoPaquete && !paquete ? (
+                <p className="text-xs text-gray-400">Cargando paquete...</p>
+              ) : paquete ? (
+                <div className="rounded-md bg-gray-50 p-3 text-[13px] space-y-1">
+                  <div className="flex justify-between">
+                    <span className="font-medium text-gray-900">{paquete.nombre_servicio}</span>
+                    <span className="font-bold text-gray-900">${formatMoney(paquete.valor_total)}</span>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    {esCompraPaquete
+                      ? "Esta cita es la compra del paquete."
+                      : `Esta cita es la sesión ${lineaPaquete?.numero_sesion ?? "–"} de ${paquete.sesiones_totales}.`}{" "}
+                    {paquete.sesiones_usadas} realizadas · {paquete.sesiones_agendadas ?? 0} agendadas
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {paqueteFacturado
+                      ? `Facturado (comprobante ${paquete.facturacion?.numero_comprobante}). Las sesiones quedan cubiertas por esa factura.`
+                      : "El paquete se factura una sola vez, con lo pagado en todas sus sesiones."}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          )}
+
           {/* PAGOS */}
           <div className="px-6 py-4 border-b border-gray-200">
             <div className="border border-gray-200 rounded-lg overflow-hidden">
               {/* Pay header */}
               <div className="flex items-center justify-between px-4 py-3 bg-gray-50 text-sm font-semibold">
-                <span>Pagos</span>
+                <span>{paquete ? "Pagos del paquete" : "Pagos"}</span>
                 <span className="text-xs font-medium text-gray-500">
-                  Cobrado: ${formatMoney(totalPagado)} / ${formatMoney(totalGeneral)}
+                  Cobrado: ${formatMoney(totalPagado)} / ${formatMoney(paquete ? paquete.valor_total : totalGeneral)}
                 </span>
               </div>
 
               <div className="p-4">
-                {/* Payment history list */}
-                {(selectedAppointment?.historial_pagos?.length ?? 0) > 0 && (
+                {/* Payment history list — paquete: todos sus pagos, con la sesión donde se recibió */}
+                {paquete && (paquete.pagos?.length ?? 0) > 0 && (
+                  <div className="mb-3">
+                    {paquete.pagos!.map((pago, idx) => (
+                      <div
+                        key={`${pago.origen}-${pago.cita_id}-${pago.indice}`}
+                        className={`flex items-center justify-between py-2 text-sm ${idx > 0 ? "border-t border-gray-100" : ""}`}
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium text-gray-800">
+                            {formatDateDMY(pago.fecha, "")} · {getPaymentMethodLabel(pago.metodo)}
+                          </p>
+                          <p className={`text-[10px] ${pago.origen === "paquete" ? "text-amber-700 font-semibold" : "text-gray-400"}`}>
+                            {pago.origen === "paquete"
+                              ? "Solo en el paquete · resolver desde la agenda"
+                              : pago.es_origen
+                                ? "Compra del paquete"
+                                : `Sesión ${pago.numero_sesion ?? "–"} (${formatDateDMY(pago.fecha_cita || "", "")})`}
+                          </p>
+                        </div>
+                        <span className="font-semibold text-gray-900">${formatMoney(pago.monto)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!paquete && (selectedAppointment?.historial_pagos?.length ?? 0) > 0 && (
                   <div className="mb-3">
                     {selectedAppointment!.historial_pagos!.filter((p) => (p.monto ?? 0) > 0).map((pago, idx) => (
                       <div
@@ -822,12 +938,19 @@ export function ServiceProtocol({
 
         {/* Footer */}
         <div className="flex-shrink-0 border-t border-gray-200">
-          {saldoPendiente > 0 && !isPagado ? (
+          {paqueteFacturado ? (
+            <button
+              className="w-full py-3.5 text-center text-sm font-bold text-gray-500 bg-gray-100 cursor-default rounded-lg"
+              disabled
+            >
+              Cubierta por la factura del paquete ({paquete?.facturacion?.numero_comprobante})
+            </button>
+          ) : saldoPendiente > 0 && !isPagado ? (
             <button
               className="w-full py-3.5 text-center text-sm font-bold text-white bg-gray-900 opacity-30 cursor-default rounded-lg"
               disabled
             >
-              Pendiente: ${formatMoney(saldoPendiente)}
+              {paquete ? "Paquete pendiente" : "Pendiente"}: ${formatMoney(saldoPendiente)}
             </button>
           ) : (
             <button
@@ -835,7 +958,7 @@ export function ServiceProtocol({
               disabled={isFacturando}
               className="w-full py-3.5 text-center text-sm font-bold text-white bg-gray-900 hover:bg-gray-800 disabled:opacity-50 rounded-lg"
             >
-              {isFacturando ? "Facturando..." : "Factura completa"}
+              {isFacturando ? "Facturando..." : paquete ? "Facturar paquete completo" : "Factura completa"}
             </button>
           )}
         </div>
