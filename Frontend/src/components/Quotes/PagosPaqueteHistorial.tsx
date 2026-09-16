@@ -34,6 +34,8 @@ interface Props {
     indice: number,
     cambios: { metodo?: string; monto?: number },
   ) => Promise<unknown>;
+  /** Eliminar un pago que el cliente al final no hizo (solo admin) */
+  onEliminarPagoCita?: (citaId: string, indice: number, motivo: string) => Promise<unknown>;
   onAbrirCita?: (citaId: string) => void;
 }
 
@@ -53,12 +55,14 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
   moneda = "COP",
   onPaqueteActualizado,
   onCorregirPagoCita,
+  onEliminarPagoCita,
   onAbrirCita,
 }) => {
   const [editando, setEditando] = useState<string | null>(null);
   const [metodo, setMetodo] = useState("");
   const [monto, setMonto] = useState("");
   const [descartando, setDescartando] = useState<number | null>(null);
+  const [eliminando, setEliminando] = useState<string | null>(null);
   const [motivo, setMotivo] = useState("");
   const [trabajando, setTrabajando] = useState(false);
 
@@ -115,6 +119,26 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
       toast.success("Pago pasado a esta sesión");
     } catch (error: any) {
       toast.error(error?.message || "No se pudo pasar el pago");
+    } finally {
+      setTrabajando(false);
+    }
+  };
+
+  const eliminarPagoDeSesion = async (p: PagoConsolidadoPaquete) => {
+    if (!onEliminarPagoCita || !p.cita_id) return;
+    if (motivo.trim().length < 3) {
+      toast.error("Escribe el motivo (ej. 'el cliente no pagó este abono')");
+      return;
+    }
+    setTrabajando(true);
+    try {
+      await onEliminarPagoCita(p.cita_id, p.indice, motivo.trim());
+      await recargar();
+      toast.success("Pago eliminado del historial");
+      setEliminando(null);
+      setMotivo("");
+    } catch (error: any) {
+      toast.error(error?.message || "No se pudo eliminar el pago");
     } finally {
       setTrabajando(false);
     }
@@ -222,6 +246,20 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
                   Corregir
                 </button>
               )}
+              {p.origen === "cita" && corregible && onEliminarPagoCita && eliminando !== clave && (
+                <button
+                  type="button"
+                  className="underline"
+                  style={{ color: "#EF4444" }}
+                  disabled={trabajando}
+                  onClick={() => {
+                    setEliminando(clave);
+                    setMotivo("");
+                  }}
+                >
+                  Eliminar
+                </button>
+              )}
               {p.origen === "cita" && p.cita_facturada && (
                 <span style={{ color: "#94A3B8" }}>(cita facturada, no se puede corregir)</span>
               )}
@@ -278,6 +316,30 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
                   {trabajando ? <Loader2 className="w-3 h-3 animate-spin" /> : "Guardar"}
                 </button>
                 <button type="button" onClick={() => setEditando(null)} className="text-xs px-2 py-1" style={{ color: "#64748B" }}>
+                  Cancelar
+                </button>
+              </div>
+            )}
+
+            {eliminando === clave && (
+              <div className="mt-2 flex items-center gap-2 flex-wrap">
+                <input
+                  value={motivo}
+                  onChange={(e) => setMotivo(e.target.value)}
+                  placeholder="Motivo (ej. el cliente no pagó este abono)"
+                  className="text-xs rounded-md px-2 py-1 flex-1 min-w-[10rem]"
+                  style={{ border: "1px solid #E2E8F0" }}
+                />
+                <button
+                  type="button"
+                  disabled={trabajando}
+                  onClick={() => eliminarPagoDeSesion(p)}
+                  className="text-xs font-semibold px-2 py-1 rounded-md text-white disabled:opacity-50"
+                  style={{ background: "#EF4444" }}
+                >
+                  Eliminar pago
+                </button>
+                <button type="button" onClick={() => setEliminando(null)} className="text-xs px-2 py-1" style={{ color: "#64748B" }}>
                   Cancelar
                 </button>
               </div>

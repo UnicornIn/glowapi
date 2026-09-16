@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import Modal from "../../../components/ui/modal";
 import { useAuth } from "../../../components/Auth/AuthContext";
-import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, cancelarCita, eliminarCita, finalizarCita, corregirPago, ApiRequestError } from "./citasApi";
+import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, cancelarCita, eliminarCita, finalizarCita, corregirPago, eliminarPagoCita, ApiRequestError } from "./citasApi";
 import { formatDateDMY } from "../../../lib/dateFormat";
 import {
   getServicios,
@@ -1506,6 +1506,43 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   const citaYaFacturada =
     appointmentDetails?.rawData?.estado_factura === "facturado" ||
     (appointmentDetails?.estado || "").toLowerCase() === "completada";
+
+
+  // Eliminar UN pago del historial: el cliente quedó de pagarlo y no lo pagó.
+  // Los demás pagos no se tocan; el backend recalcula abono y saldo y deja el
+  // registro eliminado con su motivo.
+  const [eliminandoPagoIdx, setEliminandoPagoIdx] = useState<number | null>(null);
+  const [motivoEliminarPago, setMotivoEliminarPago] = useState("");
+  const [borrandoPago, setBorrandoPago] = useState(false);
+
+  const puedeEliminarPagos = ["super_admin", "admin_sede"].includes(
+    String((user as any)?.rol || user?.role || ""),
+  );
+
+  const handleEliminarPago = async (indiceOriginal: number) => {
+    if (!appointmentDetails?.id || !user?.access_token) return;
+    if (motivoEliminarPago.trim().length < 3) {
+      toast.error("Escribe el motivo (ej. 'el cliente no pagó este abono')");
+      return;
+    }
+    setBorrandoPago(true);
+    try {
+      await eliminarPagoCita(
+        appointmentDetails.id,
+        indiceOriginal,
+        motivoEliminarPago.trim(),
+        user.access_token,
+      );
+      toast.success("Pago eliminado del historial");
+      setEliminandoPagoIdx(null);
+      setMotivoEliminarPago("");
+      onRefresh?.();
+    } catch (error: any) {
+      toast.error(extraerMensajeError(error, "No se pudo eliminar el pago"));
+    } finally {
+      setBorrandoPago(false);
+    }
+  };
 
   const iniciarEdicionMetodoPago = (indiceOriginal: number, metodoActual: string, montoActual: number) => {
     setEditandoPagoIdx(indiceOriginal);
@@ -4031,6 +4068,12 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                             onCorregirPagoCita={(citaId, indice, cambios) =>
                               corregirPago(citaId, indice, cambios, user.access_token)
                             }
+                            onEliminarPagoCita={
+                              puedeEliminarPagos
+                                ? (citaId, indice, motivo) =>
+                                    eliminarPagoCita(citaId, indice, motivo, user.access_token)
+                                : undefined
+                            }
                           />
                         ) : pagosData.pagos.length > 0 ? (
                           <div className="space-y-2">
@@ -4110,6 +4153,19 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                                             </button>
                                           )
                                         )}
+                                        {puedeEliminarPagos && metodoLower !== "giftcard" && metodoLower !== "saldo_a_favor" && !citaYaFacturada && editandoPagoIdx !== pago.indiceOriginal && eliminandoPagoIdx !== pago.indiceOriginal && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setEliminandoPagoIdx(pago.indiceOriginal);
+                                              setMotivoEliminarPago("");
+                                            }}
+                                            className="ml-1.5 underline"
+                                            style={{ color: "#EF4444" }}
+                                          >
+                                            Eliminar
+                                          </button>
+                                        )}
                                       </p>
                                     </div>
                                     <CheckCircle
@@ -4117,6 +4173,35 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                                       style={{ color: iconColor }}
                                     />
                                   </div>
+
+                                  {eliminandoPagoIdx === pago.indiceOriginal && (
+                                    <div className="mt-2 pl-11 flex items-center gap-2 flex-wrap">
+                                      <input
+                                        value={motivoEliminarPago}
+                                        onChange={(e) => setMotivoEliminarPago(e.target.value)}
+                                        placeholder="Motivo (ej. el cliente no pagó este abono)"
+                                        className="text-xs rounded-md px-2 py-1 flex-1 min-w-[12rem]"
+                                        style={{ border: "1px solid #E2E8F0" }}
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={borrandoPago}
+                                        onClick={() => handleEliminarPago(pago.indiceOriginal)}
+                                        className="text-xs font-semibold px-2 py-1 rounded-md text-white disabled:opacity-50"
+                                        style={{ background: "#EF4444" }}
+                                      >
+                                        {borrandoPago ? "..." : "Eliminar pago"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEliminandoPagoIdx(null)}
+                                        className="text-xs px-2 py-1"
+                                        style={{ color: "#64748B" }}
+                                      >
+                                        Cancelar
+                                      </button>
+                                    </div>
+                                  )}
 
                                   {editandoPagoIdx === pago.indiceOriginal && (
                                     <div className="mt-2 pl-11 flex items-center gap-2 flex-wrap">
