@@ -17,6 +17,7 @@ import {
   type Estilista,
 } from "../../../components/Professionales/estilistasApi";
 import AppointmentDetailsModal from "./AppointmentDetailsModal";
+import CitasSinCerrar from "../../../components/Quotes/CitasSinCerrar";
 import { AgendaDatePicker } from "./AgendaDatePicker";
 import { useAuth } from "../../../components/Auth/AuthContext";
 import {
@@ -466,6 +467,31 @@ const CalendarScheduler: React.FC = () => {
   const handleCitaClick = useCallback((apt: Appointment) => {
     console.log("Cita clickeada:", apt);
     setSelectedAppointment(apt);
+    setShowAppointmentDetails(true);
+  }, []);
+
+  // Abrir otra sesión del mismo paquete desde el detalle de la cita: se
+  // cambia la cita del panel y la agenda salta al día de esa sesión.
+  const handleAbrirCitaDesdePaquete = useCallback((cita: any) => {
+    setSelectedAppointment({
+      id: String(cita._id),
+      title: cita.cliente_nombre || "",
+      profesional: cita.profesional_nombre || "",
+      start: cita.hora_inicio,
+      end: cita.hora_fin,
+      color: "bg-blue-500",
+      tipo: cita.servicio_nombre || "",
+      duracion: 0,
+      precio: 0,
+      cliente_nombre: cita.cliente_nombre || "",
+      servicio_nombre: cita.servicio_nombre || "",
+      estilista_nombre: cita.profesional_nombre || "",
+      estado: cita.estado,
+      profesional_id: cita.profesional_id,
+      rawData: cita,
+    });
+    const [y, m, d] = String(cita.fecha || "").slice(0, 10).split("-").map(Number);
+    if (y && m && d) setSelectedDate(new Date(y, m - 1, d));
     setShowAppointmentDetails(true);
   }, []);
 
@@ -1942,6 +1968,15 @@ const CalendarScheduler: React.FC = () => {
               </button>
             </div>
 
+            {user?.access_token && (
+              <CitasSinCerrar
+                token={user.access_token}
+                sedeId={selectedSede?.sede_id}
+                refreshKey={refreshTrigger}
+                onAbrirCita={handleAbrirCitaDesdePaquete}
+              />
+            )}
+
             {/* Day/Week navigation */}
             <div
               className="flex items-center gap-0.5 rounded-lg"
@@ -2421,6 +2456,7 @@ const CalendarScheduler: React.FC = () => {
               setRefreshTrigger((prev) => prev + 1);
             }}
             panelMode={true}
+            onAbrirCita={handleAbrirCitaDesdePaquete}
           />
         )}
       </div>

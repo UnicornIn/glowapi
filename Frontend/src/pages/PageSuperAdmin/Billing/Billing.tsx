@@ -686,6 +686,9 @@ export default function SuperAdminBilling() {
                     const clientName = (a.cliente_nombre || a.cliente || "").split(" ").slice(0, 2).join(" ")
                     const serviceName = a.servicio_nombre || a.servicio || "—"
                     const hasAbono = (a.abono ?? 0) > 0
+                    // Sesión de un paquete ($0): no se factura sola, va con la factura del paquete
+                    const lineaPaquete = (a.servicios as Array<{ paquete_id?: string | null; numero_sesion?: number | null; comprar_paquete_sesiones?: number | null }> | undefined)?.find((s) => s.paquete_id)
+                    const esSesionPaquete = !!lineaPaquete && !lineaPaquete.comprar_paquete_sesiones
 
                     return (
                       <div
@@ -721,7 +724,7 @@ export default function SuperAdminBilling() {
 
                         <div className="w-24 flex justify-center">
                           <span className={`text-[9px] font-semibold uppercase tracking-[0.3px] px-1.5 py-0.5 rounded-sm border ${hasAbono ? "border-gray-800 text-gray-800" : "border-gray-300 text-gray-400"}`}>
-                            {hasAbono ? "Con pago" : "Pendiente"}
+                            {esSesionPaquete ? `Sesión ${lineaPaquete?.numero_sesion ?? ""} paquete` : lineaPaquete ? "Compra paquete" : hasAbono ? "Con pago" : "Pendiente"}
                           </span>
                         </div>
 
@@ -742,7 +745,7 @@ export default function SuperAdminBilling() {
                         </div>
 
                         <div className="w-24 text-right text-sm font-bold text-gray-900">
-                          {fmtCOP(a.valor_total)}
+                          {esSesionPaquete ? <span className="text-xs font-medium text-gray-400">En paquete</span> : fmtCOP(a.valor_total)}
                         </div>
                       </div>
                     )

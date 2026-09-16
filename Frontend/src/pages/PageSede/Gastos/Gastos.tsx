@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { formatMontoInput, parseMontoInput } from "../../../lib/money-input";
 import { Trash2, Plus, TrendingUp, TrendingDown, DollarSign, Loader2 } from "lucide-react";
 import { toast } from 'sonner';
 import { confirmAction } from '../../../components/ui/confirm-dialog';
@@ -195,8 +196,8 @@ export default function Gastos() {
 
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Monto *</label>
-                <input type="number" min="0" step="0.01" value={form.monto || ""}
-                  onChange={(e) => setForm({ ...form, monto: parseFloat(e.target.value) || 0 })}
+                <input type="text" inputMode="decimal" value={formatMontoInput(form.monto || "", form.moneda)}
+                  onChange={(e) => setForm({ ...form, monto: parseMontoInput(e.target.value, form.moneda) })}
                   className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-1 focus:ring-gray-900 outline-none" />
               </div>
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { formatMontoInput, parseMontoInput } from "../../../lib/money-input";
 import { ChevronDown, Loader2, Pencil, Search, X } from "lucide-react";
 import { useAuth } from "../../../components/Auth/AuthContext";
 import {
@@ -1095,10 +1096,10 @@ export function DirectSaleModal({
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs text-gray-400">$</span>
                       <input
-                        type="number"
-                        min={0}
-                        value={deliveryCostInput}
-                        onChange={(e) => setDeliveryCostInput(e.target.value)}
+                        type="text"
+                        inputMode="decimal"
+                        value={formatMontoInput(deliveryCostInput, currency)}
+                        onChange={(e) => setDeliveryCostInput(String(parseMontoInput(e.target.value, currency)))}
                         className="w-20 h-7 text-right border border-gray-200 rounded text-sm px-2 focus:outline-none focus:border-gray-400"
                       />
                     </div>
@@ -1169,11 +1170,11 @@ export function DirectSaleModal({
                           $
                         </span>
                         <input
-                          type="number"
-                          min={0}
-                          value={paymentAmounts[method] ?? ""}
+                          type="text"
+                          inputMode="decimal"
+                          value={formatMontoInput(paymentAmounts[method] ?? "", currency)}
                           onChange={(e) => {
-                            const v = Number.parseFloat(e.target.value);
+                            const v = parseMontoInput(e.target.value, currency);
                             setPaymentAmounts((prev) => ({
                               ...prev,
                               [method]: Number.isFinite(v)

@@ -1081,6 +1081,11 @@ def _enriquecer_paquete_con_pago(paquete: dict) -> dict:
     paquete["estado_pago"] = estado_pago
     paquete.setdefault("abono", 0)
     paquete.setdefault("historial_pagos", [])
+    paquete.setdefault("sesiones_agendadas", 0)
+    paquete.setdefault(
+        "sesiones_disponibles",
+        max(int(paquete.get("sesiones_restantes", 0) or 0) - int(paquete.get("sesiones_agendadas", 0) or 0), 0),
+    )
     return paquete
 
 
@@ -1131,12 +1136,7 @@ async def obtener_paquete(
     if rol not in ["admin_sede", "super_admin", "estilista", "call_center", "recepcionista"]:
         raise HTTPException(403, "No autorizado")
 
-    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
-    if not paquete:
-        raise HTTPException(404, "Paquete de sesiones no encontrado")
-
-    paquete["_id"] = str(paquete["_id"])
-    return _enriquecer_paquete_con_pago(paquete)
+    return await _paquete_con_pagos(paquete_id)
 
 
 class AjustarPaqueteRequest(BaseModel):
@@ -1162,10 +1162,21 @@ async def ajustar_paquete(
     if not paquete:
         raise HTTPException(404, "Paquete de sesiones no encontrado")
 
+    # Las sesiones usadas salen de las citas (sincronizar_paquete); el ajuste
+    # manual se guarda como diferencia para que la próxima sincronización lo
+    # respete en vez de pisarlo.
+    from app.scheduling.submodules.quotes.paquetes_helpers import sincronizar_paquete
+
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    base_restantes = int(paquete.get("sesiones_totales", 0) or 0) - int(paquete.get("sesiones_usadas", 0) or 0)
     await collection_client_packages.update_one(
         {"paquete_id": paquete_id},
         {
-            "$set": {"sesiones_restantes": data.sesiones_restantes},
+            "$set": {
+                "sesiones_restantes": data.sesiones_restantes,
+                "ajuste_sesiones": base_restantes - data.sesiones_restantes,
+            },
             "$push": {"historial_uso": {
                 "ajuste_manual": True,
                 "motivo": data.motivo,
@@ -1176,7 +1187,8 @@ async def ajustar_paquete(
             }},
         },
     )
-    return {"success": True, "paquete_id": paquete_id, "sesiones_restantes": data.sesiones_restantes}
+    resumen = await sincronizar_paquete(paquete_id) or {}
+    return {"success": True, "paquete_id": paquete_id, "sesiones_restantes": resumen.get("sesiones_restantes", data.sesiones_restantes)}
 
 
 # Mismo conjunto que METODOS_PAGO_CORREGIBLES en
@@ -1192,10 +1204,29 @@ METODOS_PAGO_PAQUETE = {
 }
 
 
+async def _paquete_con_pagos(paquete_id: str) -> dict:
+    """Paquete sincronizado + enriquecido + `pagos` consolidados de todas sus sesiones."""
+    from app.scheduling.submodules.quotes.paquetes_helpers import (
+        sincronizar_paquete, pagos_consolidados_paquete,
+    )
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+    consolidado = await pagos_consolidados_paquete(paquete)
+    paquete["_id"] = str(paquete["_id"])
+    paquete.pop("historial_pagos_legacy", None)
+    paquete["pagos"] = consolidado["pagos"]
+    return _enriquecer_paquete_con_pago(paquete)
+
+
 class RegistrarPagoPaqueteRequest(BaseModel):
     monto: float = Field(..., gt=0)
     metodo: str
     notas: Optional[str] = None
+    # Sesión desde la que se recibe el pago — el pago queda guardado en esa
+    # cita (caja lo ve el día que se registra) y suma al paquete.
+    cita_id: str
 
 
 @router.post("/paquetes/{paquete_id}/pago", response_model=dict)
@@ -1205,70 +1236,92 @@ async def registrar_pago_paquete(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Registra un abono/pago contra el PAQUETE completo, no contra una cita
-    puntual — este negocio cobra una parte al reservar el paquete y el
-    resto en cualquier punto durante las sesiones, y el cliente puede pagar
-    desde cualquiera de las citas que pertenecen a ese paquete (todas ven
-    el mismo abonado/historial, ver la pestaña "Pagos" del frontend).
+    Abono/pago del paquete recibido en una sesión. Este negocio cobra una
+    parte al comprar el paquete y el resto a mitad de las sesiones: el pago
+    se guarda en la cita de la sesión (así aparece en caja ese día) y el
+    paquete muestra el acumulado de todas sus sesiones, con fecha y sesión
+    de cada pago.
     """
+    from app.scheduling.submodules.quotes.paquetes_helpers import citas_ligadas_paquete
+
     if current_user.get("rol") not in ["admin_sede", "super_admin", "recepcionista", "call_center"]:
         raise HTTPException(403, "No autorizado para registrar pagos")
 
     metodo = data.metodo.lower().strip()
-    if metodo not in METODOS_PAGO_PAQUETE:
+    # Saldo a favor sí se admite (ej. el abono de una compra cancelada que se
+    # vuelve a agendar): se descuenta del crédito del cliente.
+    if metodo not in METODOS_PAGO_PAQUETE and metodo != "saldo_a_favor":
         raise HTTPException(400, f"Método de pago inválido: '{data.metodo}'")
 
-    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
-    if not paquete:
-        raise HTTPException(404, "Paquete de sesiones no encontrado")
-
-    paquete_enriquecido = _enriquecer_paquete_con_pago(dict(paquete))
-    saldo_pendiente_actual = paquete_enriquecido["saldo_pendiente"]
-    abono_actual = paquete_enriquecido["abono"]
-
+    paquete_actual = await _paquete_con_pagos(paquete_id)
+    saldo_pendiente_actual = paquete_actual["saldo_pendiente"]
+    abono_actual = paquete_actual["abono"]
     if saldo_pendiente_actual <= 0:
         raise HTTPException(400, "El paquete no tiene saldo pendiente")
 
     monto = round(float(data.monto), 2)
     if monto > saldo_pendiente_actual:
-        raise HTTPException(
-            400,
-            f"El monto ({monto}) excede el saldo pendiente del paquete ({saldo_pendiente_actual})"
+        raise HTTPException(400, f"El monto ({monto}) excede el saldo pendiente del paquete ({saldo_pendiente_actual})")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    cita = next((c for c, _ in await citas_ligadas_paquete(paquete) if str(c["_id"]) == data.cita_id), None)
+    if not cita:
+        raise HTTPException(400, "La cita no pertenece a este paquete")
+
+    if metodo == "saldo_a_favor":
+        from app.clients_service.credito import consumir_saldo
+        consumido = await consumir_saldo(
+            cita.get("cliente_id"), monto,
+            tipo="uso_cita", registrado_por=current_user.get("email"),
+            cita_id=data.cita_id, notas=f"Pago del paquete {paquete_id} con saldo a favor",
         )
+        if consumido <= 0:
+            raise HTTPException(400, "El cliente no tiene saldo a favor disponible")
+        monto = consumido  # consumo parcial permitido
 
-    nuevo_abono = round(abono_actual + monto, 2)
     nuevo_saldo = round(saldo_pendiente_actual - monto, 2)
-    tipo_pago = (
-        ("pago_completo" if nuevo_saldo <= 0 else "abono_inicial")
-        if abono_actual == 0 else "pago_adicional"
-    )
-
     nuevo_pago = {
         "fecha": datetime.now(),
         "monto": monto,
         "metodo": metodo,
-        "tipo": tipo_pago,
+        "tipo": ("pago_completo" if nuevo_saldo <= 0 else "abono_inicial") if abono_actual == 0 else "pago_adicional",
         "registrado_por": current_user.get("email"),
         "saldo_despues": nuevo_saldo,
         "notas": data.notas,
+        "paquete_id": paquete_id,
     }
-
-    await collection_client_packages.update_one(
-        {"paquete_id": paquete_id},
+    abono_cita = round(float(cita.get("abono", 0) or 0) + monto, 2)
+    saldo_cita = max(round(float(cita.get("valor_total", 0) or 0) - abono_cita, 2), 0)
+    await collection_citas.update_one(
+        {"_id": cita["_id"]},
         {
-            "$inc": {"abono": monto},
+            "$set": {
+                "abono": abono_cita,
+                "saldo_pendiente": saldo_cita,
+                "estado_pago": "pagado" if saldo_cita <= 0 else "abonado",
+                "metodo_pago_actual": metodo,
+                "ultima_actualizacion": datetime.now(),
+            },
             "$push": {"historial_pagos": nuevo_pago},
         },
     )
-
-    paquete_actualizado = await collection_client_packages.find_one({"paquete_id": paquete_id})
-    paquete_actualizado["_id"] = str(paquete_actualizado["_id"])
-    return _enriquecer_paquete_con_pago(paquete_actualizado)
+    return await _paquete_con_pagos(paquete_id)
 
 
 class CorregirPagoPaqueteRequest(BaseModel):
     metodo: Optional[str] = Field(None, description="Nuevo método de pago para este registro del historial")
     monto: Optional[float] = Field(None, gt=0, description="Nuevo monto para este registro del historial")
+
+
+def _pago_sin_cita(paquete: Optional[dict], indice: int) -> dict:
+    if not paquete:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+    if not paquete.get("pagos_migrados"):
+        raise HTTPException(400, "Sincroniza el paquete antes de gestionar sus pagos")
+    historial = paquete.get("historial_pagos") or []
+    if indice < 0 or indice >= len(historial):
+        raise HTTPException(404, "Pago no encontrado entre los pagos sin sesión de este paquete")
+    return historial[indice]
 
 
 @router.patch("/paquetes/{paquete_id}/pagos/{indice}", response_model=dict)
@@ -1278,67 +1331,113 @@ async def corregir_pago_paquete(
     data: CorregirPagoPaqueteRequest,
     current_user: dict = Depends(get_current_user)
 ):
-    """Corrige un pago ya registrado contra un paquete — mismo criterio que
-    `corregir_pago` de citas (routes_quotes.py): recalcula saldo_despues en
-    cascada, reclasifica el tipo solo si es el primer pago del historial."""
+    """
+    Corrige un pago que quedó guardado solo en el paquete (sin sesión). Los
+    pagos de una sesión se corrigen desde la cita (PATCH /scheduling/quotes/{cita_id}/pagos/{indice}).
+    """
     if current_user.get("rol") not in ["super_admin", "admin_sede", "recepcionista", "call_center"]:
         raise HTTPException(403, "No autorizado para corregir pagos")
-
     if data.metodo is None and data.monto is None:
         raise HTTPException(400, "Debe enviar 'metodo' y/o 'monto' para corregir")
 
     paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
-    if not paquete:
-        raise HTTPException(404, "Paquete de sesiones no encontrado")
+    _pago_sin_cita(paquete, indice)
 
-    historial_pagos = paquete.get("historial_pagos") or []
-    if indice < 0 or indice >= len(historial_pagos):
-        raise HTTPException(404, "Pago no encontrado en el historial de este paquete")
-
-    pago_actual = historial_pagos[indice]
-
-    update_set = {}
-
+    update_set = {
+        f"historial_pagos.{indice}.corregido_por": current_user.get("email"),
+        f"historial_pagos.{indice}.corregido_en": datetime.now(),
+    }
     if data.metodo is not None:
         nuevo_metodo = data.metodo.lower().strip()
         if nuevo_metodo not in METODOS_PAGO_PAQUETE:
             raise HTTPException(400, f"Método de pago inválido: '{data.metodo}'")
         update_set[f"historial_pagos.{indice}.metodo"] = nuevo_metodo
-
     if data.monto is not None:
-        monto_viejo = round(float(pago_actual.get("monto", 0) or 0), 2)
-        monto_nuevo = round(float(data.monto), 2)
-        delta = round(monto_nuevo - monto_viejo, 2)
+        update_set[f"historial_pagos.{indice}.monto"] = round(float(data.monto), 2)
 
-        if delta != 0:
-            nuevo_saldo_de_este_pago = None
-            for j in range(indice, len(historial_pagos)):
-                saldo_viejo_j = round(float(historial_pagos[j].get("saldo_despues", 0) or 0), 2)
-                nuevo_saldo_j = round(saldo_viejo_j - delta, 2)
-                update_set[f"historial_pagos.{j}.saldo_despues"] = nuevo_saldo_j
-                if j == indice:
-                    nuevo_saldo_de_este_pago = nuevo_saldo_j
-            update_set[f"historial_pagos.{indice}.monto"] = monto_nuevo
+    await collection_client_packages.update_one({"paquete_id": paquete_id}, {"$set": update_set})
+    return await _paquete_con_pagos(paquete_id)
 
-            if indice == 0 and nuevo_saldo_de_este_pago is not None:
-                update_set[f"historial_pagos.{indice}.tipo"] = (
-                    "pago_completo" if nuevo_saldo_de_este_pago <= 0 else "abono_inicial"
-                )
 
-            abono_actual = round(float(paquete.get("abono", 0) or 0), 2)
-            update_set["abono"] = round(abono_actual + delta, 2)
+class MoverPagoPaqueteRequest(BaseModel):
+    cita_id: str
 
-    update_set[f"historial_pagos.{indice}.corregido_por"] = current_user.get("email")
-    update_set[f"historial_pagos.{indice}.corregido_en"] = datetime.now()
 
+@router.post("/paquetes/{paquete_id}/pagos/{indice}/mover", response_model=dict)
+async def mover_pago_paquete_a_sesion(
+    paquete_id: str,
+    indice: int,
+    data: MoverPagoPaqueteRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Pasa un pago que quedó solo en el paquete a una de sus sesiones, con su
+    fecha original — desde ahí caja lo ve. El monto total del paquete no cambia.
+    """
+    from app.scheduling.submodules.quotes.paquetes_helpers import citas_ligadas_paquete
+
+    if current_user.get("rol") not in ["super_admin", "admin_sede"]:
+        raise HTTPException(403, "Solo un administrador puede mover pagos del paquete")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    pago = _pago_sin_cita(paquete, indice)
+    cita = next((c for c, _ in await citas_ligadas_paquete(paquete) if str(c["_id"]) == data.cita_id), None)
+    if not cita:
+        raise HTTPException(400, "La cita no pertenece a este paquete")
+    if cita.get("estado_factura") == "facturado":
+        raise HTTPException(400, "La cita ya está facturada; elige otra sesión del paquete")
+
+    pago_cita = {k: v for k, v in pago.items() if k not in ("sin_cita",)}
+    pago_cita.update({
+        "paquete_id": paquete_id,
+        "movido_desde_paquete_por": current_user.get("email"),
+        "movido_en": datetime.now(),
+    })
+    abono_cita = round(float(cita.get("abono", 0) or 0) + float(pago.get("monto", 0) or 0), 2)
+    saldo_cita = max(round(float(cita.get("valor_total", 0) or 0) - abono_cita, 2), 0)
+    await collection_citas.update_one(
+        {"_id": cita["_id"]},
+        {
+            "$set": {"abono": abono_cita, "saldo_pendiente": saldo_cita,
+                     "estado_pago": "pagado" if saldo_cita <= 0 else "abonado"},
+            "$push": {"historial_pagos": pago_cita},
+        },
+    )
+    historial = list(paquete.get("historial_pagos") or [])
+    historial.pop(indice)
+    await collection_client_packages.update_one({"paquete_id": paquete_id}, {"$set": {"historial_pagos": historial}})
+    return await _paquete_con_pagos(paquete_id)
+
+
+@router.delete("/paquetes/{paquete_id}/pagos/{indice}", response_model=dict)
+async def descartar_pago_paquete(
+    paquete_id: str,
+    indice: int,
+    motivo: str = Query(..., min_length=3),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Quita un pago que quedó solo en el paquete porque era un DUPLICADO de un
+    pago que ya está en una sesión. No se borra: queda en `pagos_descartados`
+    con quién, cuándo y por qué.
+    """
+    if current_user.get("rol") not in ["super_admin", "admin_sede"]:
+        raise HTTPException(403, "Solo un administrador puede descartar pagos del paquete")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    pago = _pago_sin_cita(paquete, indice)
+    historial = list(paquete.get("historial_pagos") or [])
+    historial.pop(indice)
     await collection_client_packages.update_one(
         {"paquete_id": paquete_id},
-        {"$set": update_set},
+        {
+            "$set": {"historial_pagos": historial},
+            "$push": {"pagos_descartados": {
+                **pago, "motivo": motivo, "descartado_por": current_user.get("email"), "descartado_en": datetime.now(),
+            }},
+        },
     )
-
-    paquete_actualizado = await collection_client_packages.find_one({"paquete_id": paquete_id})
-    paquete_actualizado["_id"] = str(paquete_actualizado["_id"])
-    return _enriquecer_paquete_con_pago(paquete_actualizado)
+    return await _paquete_con_pagos(paquete_id)
 
 
 # ============================================================

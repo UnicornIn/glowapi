@@ -14,7 +14,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.scheduling.submodules.fichas.controllers import generar_y_enviar_pdf_ficha
-from app.scheduling.submodules.quotes.paquetes_helpers import procesar_paquete_servicio, revertir_paquete_servicio
+from app.scheduling.submodules.quotes.paquetes_helpers import (
+    procesar_paquete_servicio,
+    revertir_compra_paquete,
+    sincronizar_paquete,
+    sincronizar_paquetes,
+    paquete_ids_de_servicios,
+    disponibilidad_paquete,
+    citas_ligadas_paquete,
+    estado_cita,
+    ESTADOS_NO_CUENTAN,
+    ESTADOS_CONSUMEN_SESION,
+)
 from app.commissions.comision_engine import resolver_config_comision, calcular_comision
 from app.commissions.comision_context import construir_contexto
 from app.scheduling.models import Cita, ProductoItem, PagoRequest, ServicioEnCita, ServicioEnFicha
@@ -619,10 +630,14 @@ async def crear_cita(
                 raise HTTPException(status_code=400, detail="El paquete de sesiones no aplica para este servicio")
             if not paquete_doc.get("activo", True):
                 raise HTTPException(status_code=400, detail="El paquete de sesiones ya no está activo")
-            if int(paquete_doc.get("sesiones_restantes", 0)) < cantidad:
+            # Cuenta también las sesiones ya AGENDADAS en otras citas (no solo
+            # las consumidas) — si no, se podían agendar más citas que
+            # sesiones tiene el paquete y las sobrantes quedaban sueltas.
+            disponibles = await disponibilidad_paquete(paquete_doc)
+            if disponibles < cantidad:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"El paquete solo tiene {paquete_doc.get('sesiones_restantes', 0)} sesión(es) disponible(s)"
+                    detail=f"El paquete solo tiene {max(disponibles, 0)} sesión(es) disponible(s) (contando las ya agendadas)"
                 )
 
         # ⭐ COMPRAR PAQUETE NUEVO: esta cita paga el paquete completo (ej. 5
@@ -845,6 +860,33 @@ async def crear_cita(
     # Guardar en BD
     result = await collection_citas.insert_one(data)
     cita_id = str(result.inserted_id)
+
+    # ⭐ Compra de paquete: el paquete se crea desde que se AGENDA la compra
+    # (no al finalizarla) — así las siguientes sesiones se pueden agendar
+    # ligadas desde el primer día. Si la compra se cancela, el paquete queda
+    # inactivo (ver sincronizar_paquete).
+    servicios_con_paquete_nuevo = False
+    for linea in servicios_procesados:
+        if not linea.get("comprar_paquete_sesiones"):
+            continue
+        resultado_compra = await procesar_paquete_servicio(
+            servicio_item=linea,
+            cita_id=cita_id,
+            cliente_id=cita.cliente_id,
+            sede_id=cita.sede_id,
+            moneda_sede=moneda_sede,
+            profesional_id=cita.profesional_id,
+            usuario_email=current_user.get("email"),
+            subtotal=linea.get("subtotal", 0),
+        )
+        if resultado_compra and resultado_compra.get("ok"):
+            linea["paquete_id"] = resultado_compra.get("paquete_id")
+            servicios_con_paquete_nuevo = True
+    if servicios_con_paquete_nuevo:
+        await collection_citas.update_one({"_id": result.inserted_id}, {"$set": {"servicios": servicios_procesados}})
+
+    # Numerar la sesión y reservar el cupo en el paquete desde que se agenda.
+    await sincronizar_paquetes(paquete_ids_de_servicios(servicios_procesados))
 
     # === construir email HTML mejorado ===
     estilo = """
@@ -1667,7 +1709,9 @@ async def editar_cita(
             for s in cita_actual.get("servicios", [])
             if s.get("servicio_id")
         }
-        cita_ya_finalizada = estado_actual == "finalizado"
+        # La compra de un paquete se crea/revierte en cualquier estado (el
+        # paquete nace al agendar la compra, no al finalizarla).
+        gestionar_compras = True
 
         for servicio_item in cambios["servicios"]:
             if not isinstance(servicio_item, dict):
@@ -1699,6 +1743,55 @@ async def editar_cita(
                 raise HTTPException(status_code=400, detail=f"Servicio sin precio en {moneda_sede}")
             precio_base_sede = float(precios[moneda_sede])
 
+            # ⭐ Paquetes de sesiones — preservar la marca si no viene
+            # explícita (evita perderla en una edición no relacionada, ej.
+            # mover el horario). El conteo de sesiones NO se toca acá: se
+            # guarda la cita y después `sincronizar_paquete` rehace el
+            # paquete desde las citas (ver paquetes_helpers).
+            nombre_servicio = servicio_db.get("nombre", "Servicio")
+            servicio_anterior = servicios_anteriores_map.get(servicio_id, {})
+            paquete_id_anterior = servicio_anterior.get("paquete_id")
+            comprar_anterior = servicio_anterior.get("comprar_paquete_sesiones")
+
+            paquete_id_final = (
+                servicio_item["paquete_id"] if "paquete_id" in servicio_item
+                else paquete_id_anterior
+            ) or None
+            comprar_final = (
+                servicio_item["comprar_paquete_sesiones"] if "comprar_paquete_sesiones" in servicio_item
+                else comprar_anterior
+            ) or None
+
+            # La cita que COMPRÓ el paquete queda con ambas marcas (compra +
+            # paquete_id estampado al crearlo) — eso no es un conflicto.
+            if paquete_id_final and comprar_final and paquete_id_final != paquete_id_anterior:
+                raise HTTPException(status_code=400, detail="No se puede comprar un paquete nuevo y canjear uno existente en la misma línea")
+
+            if paquete_id_final and paquete_id_final != paquete_id_anterior:
+                paquete_doc = await collection_client_packages.find_one({"paquete_id": paquete_id_final})
+                if not paquete_doc:
+                    raise HTTPException(status_code=404, detail=f"Paquete de sesiones {paquete_id_final} no encontrado")
+                if paquete_doc.get("cliente_id") != cita_actual.get("cliente_id"):
+                    raise HTTPException(status_code=400, detail="El paquete de sesiones no pertenece a este cliente")
+                if paquete_doc.get("servicio_id") != servicio_id:
+                    raise HTTPException(status_code=400, detail="El paquete de sesiones no aplica para este servicio")
+                if estado_actual not in ESTADOS_NO_CUENTAN:
+                    disponibles = await disponibilidad_paquete(paquete_doc, excluir_cita_id=str(cita_object_id))
+                    if disponibles < cantidad:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"El paquete de '{nombre_servicio}' ya no tiene sesiones disponibles ({max(disponibles, 0)})"
+                        )
+
+            tier_compra = None
+            if comprar_final:
+                tier_compra = next(
+                    (o for o in (servicio_db.get("paquetes_sesiones") or [])
+                     if int(o.get("sesiones", 0)) == int(comprar_final)),
+                    None,
+                )
+            es_cita_compradora = bool(comprar_final)
+
             precio_manual = servicio_item.get("precio")
             precio_personalizado = servicio_item.get("precio_personalizado")
             precio = None
@@ -1719,108 +1812,56 @@ async def editar_cita(
                 if precio_personalizado_float > 0:
                     precio = precio_personalizado_float
 
-            if precio is None:
-                precio = precio_base_sede
+            precio_referencia = float(tier_compra["precio"]) if tier_compra else precio_base_sede
+            if paquete_id_final and not es_cita_compradora:
+                # Sesión cubierta por el paquete: no se cobra de nuevo. Antes
+                # un precio 0 caía al precio base y la sesión se cobraba.
+                precio = 0.0
+                precio_referencia = 0.0
+            elif precio is None:
+                precio = precio_referencia
 
-            es_personalizado = round(precio, 2) != round(precio_base_sede, 2)
+            es_personalizado = round(precio, 2) != round(precio_referencia, 2)
 
             subtotal = round(precio * cantidad, 2)
             duracion_servicio = int(servicio_db.get("duracion_minutos", 0) or 0)
-            nombre_servicio = servicio_db.get("nombre", "Servicio")
 
             valor_servicios += subtotal
             duracion_total += duracion_servicio * cantidad
             nombres_servicios.append(f"{nombre_servicio} x{cantidad}" if cantidad > 1 else nombre_servicio)
 
-            # ⭐ Paquetes de sesiones — preservar si no viene explícito, y
-            # procesar el efecto real (crear/redimir/revertir) si la marca
-            # cambió y la cita ya está finalizada (retroactivo: el servicio
-            # ya se prestó). Si la cita todavía no está finalizada, el tag
-            # solo se guarda — se resuelve normalmente al Finalizar (Fase 1).
-            servicio_anterior = servicios_anteriores_map.get(servicio_id, {})
-            paquete_id_anterior = servicio_anterior.get("paquete_id")
-            comprar_anterior = servicio_anterior.get("comprar_paquete_sesiones")
-            numero_sesion_final = servicio_anterior.get("numero_sesion")
-
-            paquete_id_final = (
-                servicio_item["paquete_id"] if "paquete_id" in servicio_item
-                else paquete_id_anterior
-            )
-            comprar_final = (
-                servicio_item["comprar_paquete_sesiones"] if "comprar_paquete_sesiones" in servicio_item
-                else comprar_anterior
-            )
-
-            if cita_ya_finalizada:
-                if paquete_id_final != paquete_id_anterior:
-                    if paquete_id_anterior:
-                        resultado = await revertir_paquete_servicio(
-                            cita_id=cita_id, paquete_id_anterior=paquete_id_anterior,
+            if gestionar_compras and comprar_final != comprar_anterior:
+                if comprar_anterior:
+                    resultado = await revertir_compra_paquete(str(cita_object_id), servicio_id)
+                    if resultado and not resultado.get("ok"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"No se puede quitar la compra del paquete de '{nombre_servicio}': otras citas ya están ligadas a él. Desasócialas primero."
                         )
-                        if resultado and not resultado.get("ok"):
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"No se puede quitar el paquete de '{nombre_servicio}': otras citas ya usaron sesiones de él."
-                            )
-                        numero_sesion_final = None
-                    if paquete_id_final:
-                        resultado = await procesar_paquete_servicio(
-                            servicio_item={
-                                "servicio_id": servicio_id, "nombre": nombre_servicio,
-                                "cantidad": cantidad, "paquete_id": paquete_id_final,
-                            },
-                            cita_id=cita_id, cliente_id=cita_actual.get("cliente_id"),
-                            sede_id=cita_actual.get("sede_id"), moneda_sede=moneda_sede,
-                            profesional_id=cita_actual.get("profesional_id"),
-                            usuario_email=current_user.get("email"), subtotal=subtotal,
+                    if paquete_id_final == paquete_id_anterior:
+                        paquete_id_final = None
+                if comprar_final:
+                    resultado = await procesar_paquete_servicio(
+                        servicio_item={
+                            "servicio_id": servicio_id, "nombre": nombre_servicio,
+                            "cantidad": cantidad, "comprar_paquete_sesiones": comprar_final,
+                        },
+                        cita_id=str(cita_object_id), cliente_id=cita_actual.get("cliente_id"),
+                        sede_id=cita_actual.get("sede_id"), moneda_sede=moneda_sede,
+                        profesional_id=cita_actual.get("profesional_id"),
+                        usuario_email=current_user.get("email"), subtotal=subtotal,
+                        abono_origen=cita_actual.get("abono", 0),
+                        historial_pagos_origen=cita_actual.get("historial_pagos"),
+                    )
+                    if resultado and not resultado.get("ok"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"No se pudo crear el paquete de '{nombre_servicio}': {resultado.get('motivo')}"
                         )
-                        if resultado and not resultado.get("ok"):
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"No se pudo asignar el paquete a '{nombre_servicio}': {resultado.get('motivo')}"
-                            )
-                        if resultado:
-                            numero_sesion_final = resultado.get("numero_sesion")
-
-                if comprar_final != comprar_anterior:
-                    if comprar_anterior:
-                        resultado = await revertir_paquete_servicio(
-                            cita_id=cita_id, comprar_paquete_sesiones_anterior=comprar_anterior,
-                            servicio_id_anterior=servicio_id,
-                        )
-                        if resultado and not resultado.get("ok"):
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"No se puede quitar el paquete de '{nombre_servicio}': otras citas ya usaron sesiones de él."
-                            )
-                        numero_sesion_final = None
-                    if comprar_final:
-                        resultado = await procesar_paquete_servicio(
-                            servicio_item={
-                                "servicio_id": servicio_id, "nombre": nombre_servicio,
-                                "cantidad": cantidad, "comprar_paquete_sesiones": comprar_final,
-                            },
-                            cita_id=cita_id, cliente_id=cita_actual.get("cliente_id"),
-                            sede_id=cita_actual.get("sede_id"), moneda_sede=moneda_sede,
-                            profesional_id=cita_actual.get("profesional_id"),
-                            usuario_email=current_user.get("email"), subtotal=subtotal,
-                            abono_origen=cita_actual.get("abono", 0),
-                            historial_pagos_origen=cita_actual.get("historial_pagos"),
-                        )
-                        if resultado and not resultado.get("ok"):
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"No se pudo crear el paquete de '{nombre_servicio}': {resultado.get('motivo')}"
-                            )
-                        if resultado:
-                            numero_sesion_final = resultado.get("numero_sesion")
-                            # La compra no manda paquete_id en el request (el
-                            # paquete todavía no existe) — sin esto, la cita
-                            # origen de una compra nunca sabría a qué paquete
-                            # quedó ligada (necesario para la pestaña "Pagos").
-                            paquete_id_final = resultado.get("paquete_id")
-            elif not paquete_id_final and not comprar_final:
-                numero_sesion_final = None
+                    if resultado:
+                        # La compra no trae paquete_id (el paquete no existía):
+                        # sin esto la cita origen no sabría a qué paquete quedó ligada.
+                        paquete_id_final = resultado.get("paquete_id")
 
             servicios_procesados.append({
                 "servicio_id": servicio_id,
@@ -1831,38 +1872,23 @@ async def editar_cita(
                 "subtotal": subtotal,
                 "paquete_id": paquete_id_final,
                 "comprar_paquete_sesiones": comprar_final,
-                "numero_sesion": numero_sesion_final,
+                "numero_sesion": servicio_anterior.get("numero_sesion") if paquete_id_final else None,
             })
 
-        # Líneas que existían antes y ya NO están en el nuevo array (se
-        # eliminaron por completo, no solo se les quitó el tag) — si
-        # tenían un paquete y la cita ya está finalizada, aplica la misma
-        # regla de reversión/bloqueo.
-        if cita_ya_finalizada:
+        # Líneas que se quitaron por completo: si compraban un paquete ya
+        # creado, aplica la misma regla de bloqueo. (Los canjes quitados se
+        # liberan solos al sincronizar.)
+        if gestionar_compras:
             servicio_ids_nuevos = {s["servicio_id"] for s in servicios_procesados}
             for servicio_id_viejo, servicio_viejo in servicios_anteriores_map.items():
-                if servicio_id_viejo in servicio_ids_nuevos:
+                if servicio_id_viejo in servicio_ids_nuevos or not servicio_viejo.get("comprar_paquete_sesiones"):
                     continue
-                if servicio_viejo.get("paquete_id"):
-                    resultado = await revertir_paquete_servicio(
-                        cita_id=cita_id, paquete_id_anterior=servicio_viejo.get("paquete_id"),
+                resultado = await revertir_compra_paquete(str(cita_object_id), servicio_id_viejo)
+                if resultado and not resultado.get("ok"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"No se puede quitar '{servicio_viejo.get('nombre', servicio_id_viejo)}': otras citas ya están ligadas a su paquete."
                     )
-                    if resultado and not resultado.get("ok"):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"No se puede quitar '{servicio_viejo.get('nombre', servicio_id_viejo)}': otras citas ya usaron sesiones de su paquete."
-                        )
-                elif servicio_viejo.get("comprar_paquete_sesiones"):
-                    resultado = await revertir_paquete_servicio(
-                        cita_id=cita_id,
-                        comprar_paquete_sesiones_anterior=servicio_viejo.get("comprar_paquete_sesiones"),
-                        servicio_id_anterior=servicio_id_viejo,
-                    )
-                    if resultado and not resultado.get("ok"):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"No se puede quitar '{servicio_viejo.get('nombre', servicio_id_viejo)}': otras citas ya usaron sesiones de su paquete."
-                        )
 
         cambios["servicios"] = servicios_procesados
         cambios["servicio_nombre"] = ", ".join(nombres_servicios) if nombres_servicios else "Sin servicio"
@@ -2104,6 +2130,13 @@ async def editar_cita(
                 }}
             )
 
+    # ⭐ Paquetes: cualquier cambio (servicios, fecha/hora, estado) puede
+    # mover el conteo o la numeración — rehacer los paquetes afectados
+    # (los que tenía antes y los que tiene ahora).
+    await sincronizar_paquetes(paquete_ids_de_servicios(
+        cita_actual.get("servicios"), cambios.get("servicios"),
+    ))
+
     # Obtener cita actualizada
     cita_actualizada = await collection_citas.find_one({"_id": cita_object_id})
     normalize_cita_doc(cita_actualizada)
@@ -2125,6 +2158,27 @@ async def cancelar_cita(cita_id: str, current_user: dict = Depends(get_current_u
     if current_user.get("rol") == "usuario":
         if cita.get("cliente_id") != current_user.get("user_id") and cita.get("cliente_id") != current_user.get("cliente_id"):
             raise HTTPException(status_code=403, detail="Solo puedes cancelar tus propias citas")
+
+    # ⭐ Cita que COMPRÓ un paquete: si se cancela, el paquete queda inactivo.
+    # Si ya hay otras sesiones agendadas o realizadas con ese paquete, quedarían
+    # huérfanas — para cambiar la fecha se reprograma (editar fecha/hora), no se cancela.
+    for linea in cita.get("servicios") or []:
+        if not (linea.get("comprar_paquete_sesiones") and linea.get("paquete_id")):
+            continue
+        paquete_doc = await collection_client_packages.find_one({"paquete_id": linea["paquete_id"]})
+        if not paquete_doc or str(paquete_doc.get("cita_origen_id") or "") != str(cita["_id"]):
+            continue
+        otras = [
+            c for c, _ in await citas_ligadas_paquete(paquete_doc)
+            if str(c["_id"]) != str(cita["_id"]) and estado_cita(c) not in ESTADOS_NO_CUENTAN
+        ]
+        if otras:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Esta cita compró el paquete '{paquete_doc.get('nombre_servicio')}' y tiene {len(otras)} sesión(es) "
+                       "más ligadas. Si solo cambia el día, reprográmala (edita fecha y hora). Si de verdad se "
+                       "cancela el paquete, primero cancela o desasocia esas sesiones.",
+            )
 
     await collection_citas.update_one({"_id": ObjectId(cita["_id"])}, {"$set": {
         "estado": "cancelada",
@@ -2183,8 +2237,14 @@ async def cancelar_cita(cita_id: str, current_user: dict = Depends(get_current_u
     # próxima cita. Self-service: no requiere soporte.
     # ═══════════════════════════════════════════════
     saldo_acreditado = 0.0
+    # Sesión (no compra) de un paquete: su pago es un abono del PAQUETE y
+    # sigue contando ahí aunque esta cita se cancele — no se pasa a saldo a favor.
+    es_sesion_de_paquete = any(
+        s.get("paquete_id") and not s.get("comprar_paquete_sesiones")
+        for s in cita.get("servicios") or []
+    )
     try:
-        if not cita.get("abono_trasladado"):
+        if not cita.get("abono_trasladado") and not es_sesion_de_paquete:
             abono_total = round(float(cita.get("abono", 0) or 0), 2)
             historial_pagos = cita.get("historial_pagos", []) or []
             monto_giftcard = round(sum(
@@ -2211,6 +2271,9 @@ async def cancelar_cita(cita_id: str, current_user: dict = Depends(get_current_u
                     print(f"💳 Abono {credito} trasladado a saldo a favor de {cliente_id_cita}")
     except Exception as e:
         print(f"⚠️ Error trasladando abono a saldo a favor: {e}")
+
+    # ⭐ Una cita cancelada libera su sesión del paquete (no la gasta ni la reserva).
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
 
     return {
         "success": True,
@@ -2269,6 +2332,8 @@ async def eliminar_cita(cita_id: str, current_user: dict = Depends(get_current_u
     result = await collection_citas.delete_one({"_id": cita["_id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
 
     return {"success": True, "mensaje": "Cita eliminada permanentemente", "cita_id": cita_id}
 
@@ -2740,6 +2805,8 @@ async def registrar_pago(
         {"_id": ObjectId(cita_id)},
         {"$set": update_set, "$push": {"historial_pagos": nuevo_pago}}
     )
+    # Ej. la cita que compra un paquete: su pago cuenta para el paquete.
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
 
     if cita.get("estado") == "pre_reservada" and monto_real > 0:
         try:
@@ -2833,6 +2900,18 @@ async def corregir_pago(
             detail="No se puede corregir un pago de una cita ya facturada",
         )
 
+    # Cita cancelada cuyo abono ya se trasladó a saldo a favor: ese dinero ya
+    # está en el crédito del cliente. Corregir el pago acá (ej. bajarlo a
+    # $10 para "moverlo" a otra cita) altera la caja del día original y deja
+    # el saldo a favor duplicado. Para usarlo, se paga la nueva cita con
+    # método "Saldo a favor".
+    if cita.get("abono_trasladado"):
+        raise HTTPException(
+            status_code=400,
+            detail="El abono de esta cita cancelada ya pasó a saldo a favor del cliente. "
+                   "No se corrige acá: en la nueva cita registra el pago con el método 'Saldo a favor'.",
+        )
+
     historial_pagos = cita.get("historial_pagos") or []
     if indice < 0 or indice >= len(historial_pagos):
         raise HTTPException(status_code=404, detail="Pago no encontrado en el historial de esta cita")
@@ -2904,6 +2983,8 @@ async def corregir_pago(
         {"_id": cita["_id"]},
         {"$set": update_set}
     )
+    # El abonado de un paquete es la suma de los pagos de sus sesiones.
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
 
     return {
         "success": True,
@@ -2966,6 +3047,7 @@ async def completar_cita(cita_id: str, current_user: dict = Depends(get_current_
         "finalizado_por": current_user.get("email"),
         "fecha_finalizacion": today(sede).replace(tzinfo=None)
     }})
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
 
     return {"success": True, "mensaje": "Cita finalizada", "cita_id": cita_id}
 
@@ -2987,6 +3069,7 @@ async def no_asistio(cita_id: str, current_user: dict = Depends(get_current_user
         "marcada_no_asistio_por": current_user.get("email"),
         "fecha_no_asistio": today(sede).replace(tzinfo=None)
     }})
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
 
     return {"success": True, "mensaje": "Marcada como no asistió", "cita_id": cita_id}
 
@@ -3766,7 +3849,7 @@ async def finalizar_servicio_con_pdf(
     if not cita:
         raise HTTPException(status_code=404, detail="La cita no existe")
 
-    if cita.get("estado") == "finalizado":
+    if cita.get("estado") in ("finalizado", "completada"):
         raise HTTPException(status_code=400, detail="Esta cita ya fue finalizada")
 
     sede = await collection_locales.find_one({"sede_id": cita.get("sede_id")})
@@ -3824,7 +3907,10 @@ async def finalizar_servicio_con_pdf(
     servicios_paquetes_actualizados = False
     paquete_advertencias = []
     for servicio_item in servicios_cita:
-        if not (servicio_item.get("paquete_id") or servicio_item.get("comprar_paquete_sesiones")):
+        # Solo la COMPRA necesita crear algo acá (el documento del paquete).
+        # Un canje ya quedó ligado por `paquete_id` desde que se agendó — el
+        # consumo lo cuenta `sincronizar_paquete` al ver la cita finalizada.
+        if not servicio_item.get("comprar_paquete_sesiones") or servicio_item.get("paquete_id"):
             continue
         cantidad_item = int(servicio_item.get("cantidad", 1) or 1)
         subtotal_item = servicio_item.get(
@@ -3845,27 +3931,24 @@ async def finalizar_servicio_con_pdf(
             historial_pagos_origen=cita.get("historial_pagos"),
         )
         if resultado_paquete and resultado_paquete.get("ok"):
-            servicio_item["numero_sesion"] = resultado_paquete.get("numero_sesion")
-            # Necesario también para "comprar" (el request no trae paquete_id
-            # porque el paquete todavía no existe) — sin esto la cita origen
-            # de una compra no sabría a qué paquete quedó ligada.
+            # El request de compra no trae paquete_id (el paquete no existía):
+            # sin esto la cita origen no sabría a qué paquete quedó ligada.
             servicio_item["paquete_id"] = resultado_paquete.get("paquete_id")
+            servicio_item["numero_sesion"] = 1
             servicios_paquetes_actualizados = True
-        elif resultado_paquete and not resultado_paquete.get("ok"):
-            # No bloquear la finalización — el servicio ya se prestó. Queda
-            # visible en la respuesta para que el admin lo corrija a mano
-            # (ajustar_paquete, ya existente) en vez de tumbar un servicio
-            # que ya se realizó.
-            paquete_advertencias.append({
-                "servicio_id": servicio_item.get("servicio_id"),
-                "motivo": resultado_paquete.get("motivo"),
-            })
 
     if servicios_paquetes_actualizados:
         await collection_citas.update_one(
             {"_id": ObjectId(cita_id)},
             {"$set": {"servicios": servicios_cita}},
         )
+
+    resumenes = await sincronizar_paquetes(paquete_ids_de_servicios(servicios_cita))
+    for pid, resumen in resumenes.items():
+        if resumen and resumen.get("sobrecupo"):
+            # No bloquear la finalización — el servicio ya se prestó. Queda
+            # visible para que el admin lo corrija desde las sesiones del paquete.
+            paquete_advertencias.append({"paquete_id": pid, "motivo": "sin_saldo"})
 
     # ── Analytics ────────────────────────────────────────────────────────────
     cliente_id = cita.get("cliente_id")
@@ -4029,3 +4112,431 @@ async def resumen_metricas(
             },
         },
     }
+
+
+# =============================================================
+# 🎟️ PAQUETES DE SESIONES — sesiones de un paquete, asociar/desasociar citas
+# =============================================================
+ROLES_GESTION_PAQUETES = {"admin_sede", "super_admin"}
+ROLES_VER_PAQUETES = {"admin_sede", "super_admin", "recepcionista", "call_center", "estilista"}
+
+
+class AsociarPaqueteRequest(BaseModel):
+    paquete_id: str
+
+
+def _resumen_cita_paquete(cita: dict, idx: Optional[int], paquete: dict) -> dict:
+    estado = estado_cita(cita)
+    linea = (cita.get("servicios") or [])[idx] if idx is not None else {}
+    if estado in ESTADOS_NO_CUENTAN:
+        cuenta = "no_cuenta"
+    elif estado in ESTADOS_CONSUMEN_SESION:
+        cuenta = "consumida"
+    else:
+        cuenta = "agendada"
+    doc = normalize_cita_doc(dict(cita))
+    return {
+        "cita_id": doc["_id"],
+        "numero_sesion": linea.get("numero_sesion"),
+        "fecha": doc.get("fecha"),
+        "hora_inicio": doc.get("hora_inicio"),
+        "hora_fin": doc.get("hora_fin"),
+        "estado": cita.get("estado"),
+        "estado_factura": cita.get("estado_factura"),
+        "numero_comprobante": cita.get("numero_comprobante"),
+        "profesional_nombre": cita.get("profesional_nombre"),
+        "valor_total": cita.get("valor_total", 0),
+        "abono": cita.get("abono", 0),
+        "cuenta": cuenta,
+        "es_origen": doc["_id"] == str(paquete.get("cita_origen_id") or ""),
+        "cita": doc,
+    }
+
+
+def _recalcular_totales_cita(cita: dict, servicios: list) -> dict:
+    """valor_total/saldo/estado_pago de una cita a partir de sus servicios y productos."""
+    total_servicios = sum(float(s.get("subtotal", 0) or 0) for s in servicios)
+    total_productos = sum(float(p.get("subtotal", 0) or 0) for p in cita.get("productos", []) or [])
+    valor_total = round(total_servicios + total_productos, 2)
+    abono = round(float(cita.get("abono", 0) or 0), 2)
+    saldo = max(round(valor_total - abono, 2), 0)
+    return {
+        "valor_total": valor_total,
+        "saldo_pendiente": saldo,
+        "estado_pago": "pagado" if saldo <= 0 else ("abonado" if abono > 0 else "pendiente"),
+    }
+
+
+@router.get("/paquetes/{paquete_id}/sesiones", response_model=dict)
+async def sesiones_de_paquete(paquete_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Todas las citas de un paquete (pasadas y futuras, con su número de
+    sesión) + las citas del mismo cliente y servicio que NO quedaron ligadas
+    a ningún paquete (`sin_asociar`) — candidatas a asociar a mano.
+    Sincroniza el paquete antes de responder (autocorrige datos viejos).
+    """
+    from app.clients_service.routes_clientes import _enriquecer_paquete_con_pago
+
+    if current_user.get("rol") not in ROLES_VER_PAQUETES:
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    resumen = await sincronizar_paquete(paquete_id)
+    if not resumen:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    ligadas = await citas_ligadas_paquete(paquete)
+    sesiones = [_resumen_cita_paquete(c, idx, paquete) for c, idx in ligadas]
+    ids_ligadas = {s["cita_id"] for s in sesiones}
+
+    candidatas = await collection_citas.find({
+        "cliente_id": paquete.get("cliente_id"),
+        "servicios": {"$elemMatch": {
+            "servicio_id": paquete.get("servicio_id"),
+            "paquete_id": {"$in": [None, ""]},
+            "comprar_paquete_sesiones": {"$in": [None, 0]},
+        }},
+        "estado": {"$nin": list(ESTADOS_NO_CUENTAN)},
+    }).to_list(None)
+    sin_asociar = []
+    for c in candidatas:
+        if str(c["_id"]) in ids_ligadas:
+            continue
+        idx = next(
+            (i for i, s in enumerate(c.get("servicios") or []) if s.get("servicio_id") == paquete.get("servicio_id")),
+            None,
+        )
+        sin_asociar.append(_resumen_cita_paquete(c, idx, paquete))
+    sin_asociar.sort(key=lambda s: (str(s.get("fecha") or ""), str(s.get("hora_inicio") or "")))
+
+    paquete["_id"] = str(paquete["_id"])
+    paquete.pop("historial_uso", None)
+    return {
+        "paquete": _enriquecer_paquete_con_pago(paquete),
+        "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
+        "sesiones": sesiones,
+        "sin_asociar": sin_asociar,
+    }
+
+
+@router.post("/{cita_id}/asociar-paquete", response_model=dict)
+async def asociar_cita_a_paquete(
+    cita_id: str,
+    data: AsociarPaqueteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Liga a mano una cita que quedó por fuera de su paquete (se agendó con
+    "precio normal" en vez de "usar sesión del paquete"). Funciona en
+    cualquier estado — también para citas ya finalizadas o facturadas.
+
+    - Sin pagos propios ni factura: su servicio pasa a $0 (cubierto por el
+      paquete) y, si el paquete ya se facturó, la sesión queda "Facturada"
+      con esa misma factura.
+    - Con pagos o factura propia: NO se tocan montos ni la factura (son
+      registros contables) — se devuelve una advertencia para que el admin
+      decida (anular la factura / mover el pago).
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede asociar citas a paquetes")
+
+    cita = await resolve_cita_by_id(cita_id)
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    if current_user.get("rol") == "admin_sede" and cita.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar citas de tu propia sede")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": data.paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if paquete.get("cliente_id") != cita.get("cliente_id"):
+        raise HTTPException(status_code=400, detail="El paquete no pertenece al cliente de esta cita")
+    if not paquete.get("activo", True):
+        raise HTTPException(status_code=400, detail="El paquete está inactivo (la cita que lo compró se canceló)")
+
+    servicios = cita.get("servicios") or []
+    idx = next((i for i, s in enumerate(servicios) if s.get("servicio_id") == paquete.get("servicio_id")), None)
+    if idx is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"La cita no tiene el servicio del paquete ({paquete.get('nombre_servicio')})",
+        )
+    linea = servicios[idx]
+    if linea.get("paquete_id") == data.paquete_id:
+        resumen = await sincronizar_paquete(data.paquete_id) or {}
+        return {
+            "success": True,
+            "mensaje": "La cita ya estaba asociada a este paquete",
+            "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
+            "advertencias": [],
+        }
+    if linea.get("paquete_id"):
+        raise HTTPException(status_code=400, detail=f"Esta cita ya está asociada al paquete {linea.get('paquete_id')}. Desasóciala primero.")
+    if linea.get("comprar_paquete_sesiones"):
+        raise HTTPException(status_code=400, detail="Esta cita es la compra de un paquete; no puede canjear otro en la misma línea")
+
+    cantidad = int(linea.get("cantidad", 1) or 1)
+    if estado_cita(cita) not in ESTADOS_NO_CUENTAN:
+        disponibles = await disponibilidad_paquete(paquete, excluir_cita_id=str(cita["_id"]))
+        if disponibles < cantidad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El paquete ya no tiene sesiones disponibles ({max(disponibles, 0)} de {paquete.get('sesiones_totales')}). "
+                       "Revisa si alguna cita agendada del paquete sobra antes de asociar esta.",
+            )
+
+    advertencias = []
+    abono = float(cita.get("abono", 0) or 0)
+    facturada = cita.get("estado_factura") == "facturado"
+    set_cita = {
+        f"servicios.{idx}.paquete_id": data.paquete_id,
+        f"servicios.{idx}.asociado_manual": {
+            "por": current_user.get("email"),
+            "fecha": datetime.now(),
+            "precio_anterior": linea.get("precio"),
+        },
+        "ultima_actualizacion": datetime.now(),
+    }
+    if not facturada:
+        # La sesión la cubre el paquete. Lo que el cliente haya pagado en esta
+        # cita (ej. la cuota de $80.000) no se toca: sigue en caja y ahora
+        # suma como abono del paquete.
+        servicios[idx] = {**linea, "precio": 0, "subtotal": 0, "precio_personalizado": False}
+        set_cita[f"servicios.{idx}.precio"] = 0
+        set_cita[f"servicios.{idx}.subtotal"] = 0
+        set_cita[f"servicios.{idx}.precio_personalizado"] = False
+        set_cita.update(_recalcular_totales_cita(cita, servicios))
+    else:
+        advertencias.append(
+            f"La cita ya tenía su propia factura ({cita.get('numero_comprobante')}), que no se modificó."
+        )
+    if abono > 0:
+        advertencias.append(
+            f"Los {abono} pagados en esta cita ahora cuentan como abono del paquete. "
+            "Si era un cobro de más, corrígelo o anula la factura."
+        )
+
+    await collection_citas.update_one({"_id": cita["_id"]}, {"$set": set_cita})
+    resumen = await sincronizar_paquete(data.paquete_id) or {}
+    numero = (resumen.get("numeros") or {}).get(str(cita["_id"]))
+
+    return {
+        "success": True,
+        "mensaje": f"Cita asociada como sesión {numero or '-'} de {paquete.get('sesiones_totales')}",
+        "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
+        "advertencias": advertencias,
+    }
+
+
+@router.post("/{cita_id}/desasociar-paquete", response_model=dict)
+async def desasociar_cita_de_paquete(
+    cita_id: str,
+    data: AsociarPaqueteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Quita una cita de su paquete (se ligó por error) y libera la sesión.
+    Si estaba "Facturada" solo por heredar la factura del paquete, se le
+    quita esa marca y su servicio vuelve al precio que tenía (queda con
+    saldo pendiente para cobrarla aparte). No aplica a la cita que compró
+    el paquete.
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede desasociar citas de paquetes")
+
+    cita = await resolve_cita_by_id(cita_id)
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    if current_user.get("rol") == "admin_sede" and cita.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar citas de tu propia sede")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": data.paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if str(cita["_id"]) == str(paquete.get("cita_origen_id") or ""):
+        raise HTTPException(status_code=400, detail="Esta cita es la que compró el paquete; no se puede desasociar")
+
+    servicios = cita.get("servicios") or []
+    idx = next((i for i, s in enumerate(servicios) if s.get("paquete_id") == data.paquete_id), None)
+    if idx is None:
+        raise HTTPException(status_code=400, detail="La cita no está asociada a este paquete")
+    linea = dict(servicios[idx])
+
+    # ¿La factura de esta cita es la del paquete (heredada) o una propia?
+    comprobante_paquete = (paquete.get("facturacion") or {}).get("numero_comprobante")
+    if not comprobante_paquete:
+        origen = paquete.get("cita_origen_id")
+        if origen and ObjectId.is_valid(str(origen)):
+            cita_origen = await collection_citas.find_one({"_id": ObjectId(str(origen))}, {"numero_comprobante": 1})
+            comprobante_paquete = (cita_origen or {}).get("numero_comprobante")
+    facturada = cita.get("estado_factura") == "facturado"
+    factura_heredada = bool(
+        facturada and comprobante_paquete
+        and cita.get("numero_comprobante") == comprobante_paquete
+        and float(cita.get("abono", 0) or 0) <= 0
+    )
+
+    set_cita = {"ultima_actualizacion": datetime.now()}
+    unset_cita = {
+        f"servicios.{idx}.paquete_id": "",
+        f"servicios.{idx}.numero_sesion": "",
+        f"servicios.{idx}.asociado_manual": "",
+    }
+
+    if not facturada or factura_heredada:
+        precio_anterior = (linea.get("asociado_manual") or {}).get("precio_anterior")
+        if not precio_anterior:
+            servicio_db = await collection_servicios.find_one({"servicio_id": linea.get("servicio_id")})
+            sede = await collection_locales.find_one({"sede_id": cita.get("sede_id")})
+            moneda = (sede or {}).get("moneda", "COP")
+            precio_anterior = float(((servicio_db or {}).get("precios") or {}).get(moneda, 0) or 0)
+        cantidad = int(linea.get("cantidad", 1) or 1)
+        linea["precio"] = round(float(precio_anterior), 2)
+        linea["subtotal"] = round(float(precio_anterior) * cantidad, 2)
+        servicios[idx] = linea
+        set_cita[f"servicios.{idx}.precio"] = linea["precio"]
+        set_cita[f"servicios.{idx}.subtotal"] = linea["subtotal"]
+        set_cita.update(_recalcular_totales_cita(cita, servicios))
+
+    if factura_heredada:
+        set_cita["estado"] = "finalizado"
+        for campo in ("estado_factura", "numero_comprobante", "fecha_facturacion", "facturado_por"):
+            unset_cita[campo] = ""
+
+    await collection_citas.update_one({"_id": cita["_id"]}, {"$set": set_cita, "$unset": unset_cita})
+    resumen = await sincronizar_paquete(data.paquete_id) or {}
+
+    return {
+        "success": True,
+        "mensaje": "Cita desasociada del paquete",
+        "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
+    }
+
+
+@router.post("/paquetes/{paquete_id}/sincronizar", response_model=dict)
+async def sincronizar_paquete_endpoint(paquete_id: str, current_user: dict = Depends(get_current_user)):
+    """Recalcula un paquete desde sus citas (conteo, historial y números de sesión)."""
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    resumen = await sincronizar_paquete(paquete_id)
+    if not resumen:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    return {"success": True, "resumen": resumen}
+
+
+@router.post("/paquetes-sincronizar-todos", response_model=dict)
+async def sincronizar_todos_los_paquetes(
+    cliente_id: Optional[str] = Query(default=None),
+    aplicar: bool = Query(default=False, description="false = solo vista previa, no escribe nada"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Reparación en lote de paquetes (o los de un cliente):
+    1. Crea el paquete de las citas que compraron uno y nunca se creó
+       (compras finalizadas antes de que el paquete naciera al agendar).
+    2. Sincroniza todos: sesiones usadas/agendadas, números de sesión,
+       activo/inactivo, y unifica los pagos en las sesiones.
+
+    Por defecto es VISTA PREVIA (`aplicar=false`): devuelve qué cambiaría
+    sin escribir nada. Revisar y volver a llamar con `aplicar=true`.
+    """
+    if current_user.get("rol") != "super_admin":
+        raise HTTPException(status_code=403, detail="Solo super_admin")
+
+    filtro_cliente = {"cliente_id": cliente_id} if cliente_id else {}
+
+    compras_sin_paquete = await collection_citas.find({
+        **filtro_cliente,
+        "estado": {"$nin": list(ESTADOS_NO_CUENTAN)},
+        "servicios": {"$elemMatch": {
+            "comprar_paquete_sesiones": {"$gt": 0},
+            "paquete_id": {"$in": [None, ""]},
+        }},
+    }).to_list(None)
+
+    paquetes_creados = []
+    for cita in compras_sin_paquete:
+        cita_id = str(cita["_id"])
+        detalle = {
+            "cita_id": cita_id,
+            "cliente_nombre": cita.get("cliente_nombre"),
+            "fecha": str(cita.get("fecha") or "")[:10],
+            "estado": cita.get("estado"),
+        }
+        if not aplicar:
+            paquetes_creados.append(detalle)
+            continue
+        sede = await collection_locales.find_one({"sede_id": cita.get("sede_id")}) or {}
+        servicios = cita.get("servicios") or []
+        for linea in servicios:
+            if not linea.get("comprar_paquete_sesiones") or linea.get("paquete_id"):
+                continue
+            resultado = await procesar_paquete_servicio(
+                servicio_item=linea,
+                cita_id=cita_id,
+                cliente_id=cita.get("cliente_id"),
+                sede_id=cita.get("sede_id"),
+                moneda_sede=sede.get("moneda", "COP"),
+                profesional_id=cita.get("profesional_id"),
+                usuario_email=current_user.get("email"),
+                subtotal=linea.get("subtotal", linea.get("precio", 0)),
+            )
+            if resultado and resultado.get("ok"):
+                linea["paquete_id"] = resultado.get("paquete_id")
+                paquetes_creados.append({**detalle, "paquete_id": linea["paquete_id"]})
+        await collection_citas.update_one({"_id": cita["_id"]}, {"$set": {"servicios": servicios}})
+
+    paquete_ids = [p["paquete_id"] async for p in collection_client_packages.find(filtro_cliente, {"paquete_id": 1})]
+    resultados = {}
+    for pid in paquete_ids:
+        try:
+            resultados[pid] = await sincronizar_paquete(pid, dry_run=not aplicar)
+        except Exception as e:
+            resultados[pid] = {"error": str(e)}
+
+    def _limpio(r):
+        return {k: v for k, v in (r or {}).items() if k != "numeros"}
+
+    return {
+        "success": True,
+        "aplicado": aplicar,
+        "paquetes_a_crear" if not aplicar else "paquetes_creados": paquetes_creados,
+        "total_paquetes": len(resultados),
+        "con_cambios": [
+            pid for pid, r in resultados.items()
+            if r and (r.get("cambios_citas") or r.get("cambios_paquete"))
+        ] if not aplicar else None,
+        "con_sobrecupo": [pid for pid, r in resultados.items() if r and r.get("sobrecupo")],
+        "inactivos": [pid for pid, r in resultados.items() if r and r.get("activo") is False],
+        "resultados": {pid: _limpio(r) for pid, r in resultados.items()},
+    }
+
+
+@router.get("/pendientes-cierre", response_model=dict)
+async def citas_pendientes_de_cierre(
+    sede_id: Optional[str] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Citas cuya fecha ya pasó y siguen "confirmada"/"pre_reservada": hay que
+    cerrarlas (Finalizar, No asistió o Cancelar). Mientras no se cierren, una
+    sesión de paquete cuenta como agendada y no como realizada.
+    """
+    if current_user.get("rol") not in ROLES_VER_PAQUETES:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    if current_user.get("rol") == "admin_sede":
+        sede_id = current_user.get("sede_id")
+
+    sede = await collection_locales.find_one({"sede_id": sede_id}) if sede_id else None
+    if not sede:
+        sede = await collection_locales.find_one({})
+    hoy = today(sede).strftime("%Y-%m-%d") if sede else datetime.now().strftime("%Y-%m-%d")
+    query = {
+        "fecha": {"$lt": hoy},
+        "estado": {"$in": ["confirmada", "pre_reservada", "pendiente"]},
+    }
+    if sede_id:
+        query["sede_id"] = sede_id
+
+    citas = await collection_citas.find(query).sort([("fecha", 1), ("hora_inicio", 1)]).to_list(500)
+    return {"total": len(citas), "hoy": hoy, "citas": [normalize_cita_doc(c) for c in citas]}

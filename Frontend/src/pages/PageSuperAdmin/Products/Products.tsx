@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useMemo } from "react"
+import { formatMontoInput, parseMontoInput } from "../../../lib/money-input";
 import { useSearchParams } from "react-router-dom"
 import { AlertTriangle, Loader2, AlertCircle, ArrowRightLeft, Globe, Check, Building2, ChevronLeft, ChevronRight, Pencil, Plus, Search, SlidersHorizontal } from "lucide-react"
 import { SedeDropdown } from "../../../components/ui/SedeDropdown"
@@ -1768,8 +1769,9 @@ export function ProductsList() {
                 <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">Precio de compra</label>
                   <Input
-                    value={costoReferencia}
-                    onChange={(e) => setCostoReferencia(e.target.value)}
+                    inputMode="decimal"
+                    value={formatMontoInput(costoReferencia, ventasCurrency)}
+                    onChange={(e) => setCostoReferencia(String(parseMontoInput(e.target.value, ventasCurrency)))}
                     placeholder="$0"
                     className="border-gray-200 bg-white text-sm"
                   />
@@ -1777,8 +1779,9 @@ export function ProductsList() {
                 <div>
                   <label className="block text-xs font-medium text-gray-500 mb-1">Precio de venta</label>
                   <Input
-                    value={precioReferencia}
-                    onChange={(e) => setPrecioReferencia(e.target.value)}
+                    inputMode="decimal"
+                    value={formatMontoInput(precioReferencia, ventasCurrency)}
+                    onChange={(e) => setPrecioReferencia(String(parseMontoInput(e.target.value, ventasCurrency)))}
                     placeholder="$0"
                     className="border-gray-200 bg-white text-sm"
                   />
@@ -2060,19 +2063,19 @@ export function ProductsList() {
                   />
 
                   <Input
-                    type="number"
-                    min={0}
-                    value={precioReferencia}
-                    onChange={(e) => setPrecioReferencia(e.target.value)}
+                    type="text"
+                    inputMode="decimal"
+                    value={formatMontoInput(precioReferencia, ventasCurrency)}
+                    onChange={(e) => setPrecioReferencia(String(parseMontoInput(e.target.value, ventasCurrency)))}
                     placeholder="Precio de venta"
                     className="border-gray-300"
                   />
 
                   <Input
-                    type="number"
-                    min={0}
-                    value={costoReferencia}
-                    onChange={(e) => setCostoReferencia(e.target.value)}
+                    type="text"
+                    inputMode="decimal"
+                    value={formatMontoInput(costoReferencia, ventasCurrency)}
+                    onChange={(e) => setCostoReferencia(String(parseMontoInput(e.target.value, ventasCurrency)))}
                     placeholder="Costo"
                     className="border-gray-300"
                   />
@@ -2138,10 +2141,10 @@ export function ProductsList() {
               <div>
                 <label className="text-sm text-gray-700">Precio ({(ventasCurrency || "COP").toUpperCase()})</label>
                 <Input
-                  type="number"
-                  min="0"
-                  value={editingPrice}
-                  onChange={(e) => setEditingPrice(e.target.value)}
+                  type="text"
+                  inputMode="decimal"
+                  value={formatMontoInput(editingPrice, ventasCurrency)}
+                  onChange={(e) => setEditingPrice(String(parseMontoInput(e.target.value, ventasCurrency)))}
                   disabled={editingLoading || editingSaving}
                   className="mt-1"
                 />

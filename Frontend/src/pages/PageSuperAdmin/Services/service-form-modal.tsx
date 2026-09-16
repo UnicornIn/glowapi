@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { formatMontoInput, parseMontoInput } from "../../../lib/money-input";
+import { getStoredCurrency } from "../../../lib/currency";
 import { X, Loader, Plus, Trash2 } from "lucide-react";
 import { toast } from 'sonner';
 import type { Service, PaqueteSesionesOpcion } from "../../../types/service";
@@ -35,6 +37,7 @@ export function ServiceFormModal({
     activo: true,
   });
   const [paquetesDraft, setPaquetesDraft] = useState<PaqueteDraft[]>([]);
+  const monedaFormulario = getStoredCurrency("COP");
 
   useEffect(() => {
     if (service) {
@@ -165,15 +168,15 @@ export function ServiceFormModal({
               </label>
               <input
                 id="precio"
-                type="number"
-                min="0"
-                step="0.01"
-                value={formData.precio ?? ""}
+                type="text"
+                inputMode="decimal"
+                value={formatMontoInput(formData.precio ?? "", monedaFormulario)}
                 onChange={(e) => {
                   const raw = e.target.value;
                   setFormData({
                     ...formData,
-                    precio: raw === "" ? undefined : parseFloat(raw),
+                    // "160.000" = ciento sesenta mil (punto de miles) — lib/money-input
+                    precio: raw === "" ? undefined : parseMontoInput(raw, monedaFormulario),
                   });
                 }}
                 className="w-full rounded-lg border border-gray-300 px-4 py-2 focus:border-[oklch(0.55_0.25_280)] focus:outline-none focus:ring-2 focus:ring-[oklch(0.55_0.25_280)]/20"
@@ -254,14 +257,13 @@ export function ServiceFormModal({
                     />
                     <span className="text-sm text-gray-500 shrink-0">sesiones por</span>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
+                      type="text"
+                      inputMode="decimal"
                       placeholder="Precio total"
-                      value={p.precio ?? ""}
+                      value={formatMontoInput(p.precio ?? "", monedaFormulario)}
                       onChange={(e) => {
                         const raw = e.target.value;
-                        updatePaqueteRow(idx, 'precio', raw === "" ? undefined : parseFloat(raw));
+                        updatePaqueteRow(idx, 'precio', raw === "" ? undefined : parseMontoInput(raw, monedaFormulario));
                       }}
                       className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-[oklch(0.55_0.25_280)] focus:outline-none"
                       disabled={isSaving}

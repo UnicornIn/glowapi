@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useState, useEffect } from "react"
+import { formatMontoInput, parseMontoInput } from "../../../../lib/money-input";
 import { toast } from "sonner"
 import { X, ArrowLeft, CheckCircle, CreditCard, DollarSign, Calendar, Clock, User, Scissors, Link as LinkIcon, Wallet, Gift } from "lucide-react"
 import { crearCita } from '../../../../components/Quotes/citasApi'
@@ -580,8 +581,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                                         Monto del abono
                                     </label>
                                     <input
-                                        type="number"
-                                        value={depositAmountInput}
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={formatMontoInput(depositAmountInput, userCurrency)}
                                         onChange={(event) => {
                                             const rawValue = event.target.value;
                                             if (rawValue === "") {
@@ -590,7 +592,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                                                 return;
                                             }
 
-                                            const numericValue = Number(rawValue.replace(",", "."));
+                                            // "10.000" = diez mil (punto de miles) — lib/money-input
+                                            const numericValue = parseMontoInput(rawValue, userCurrency);
                                             if (!Number.isFinite(numericValue) || numericValue < 0) return;
 
                                             const clampedValue = Math.min(numericValue, citaData.monto_total);

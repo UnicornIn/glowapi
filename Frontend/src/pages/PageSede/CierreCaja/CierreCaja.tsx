@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { formatMontoInput, parseMontoInput } from "../../../lib/money-input";
 import { Sidebar } from "../../../components/Layout/Sidebar";
 import { PageHeader } from "../../../components/Layout/PageHeader";
 import { Button } from "../../../components/ui/button";
@@ -2082,10 +2083,10 @@ export default function CierreCajaPage() {
                       <div>
                         <label className={FIELD_LABEL_CLASS}>Monto inicial</label>
                         <Input
-                          type="number"
-                          min="0"
-                          value={aperturaMonto}
-                          onChange={(e) => setAperturaMonto(e.target.value)}
+                          type="text"
+                          inputMode="decimal"
+                          value={formatMontoInput(aperturaMonto, monedaSede)}
+                          onChange={(e) => setAperturaMonto(String(parseMontoInput(e.target.value, monedaSede)))}
                           className={INPUT_CLASS}
                         />
                       </div>
@@ -2132,10 +2133,10 @@ export default function CierreCajaPage() {
                       <div>
                         <label className={FIELD_LABEL_CLASS}>Efectivo contado</label>
                         <Input
-                          type="number"
-                          min="0"
-                          value={cierreEfectivoContado}
-                          onChange={(e) => setCierreEfectivoContado(e.target.value)}
+                          type="text"
+                          inputMode="decimal"
+                          value={formatMontoInput(cierreEfectivoContado, monedaSede)}
+                          onChange={(e) => setCierreEfectivoContado(String(parseMontoInput(e.target.value, monedaSede)))}
                           className={INPUT_CLASS}
                         />
                       </div>
@@ -2270,10 +2271,10 @@ export default function CierreCajaPage() {
                         <div>
                           <label className={FIELD_LABEL_CLASS}>Cantidad</label>
                           <Input
-                            type="number"
-                            min="0"
-                            value={egresoMonto}
-                            onChange={(e) => setEgresoMonto(e.target.value)}
+                            type="text"
+                            inputMode="decimal"
+                            value={formatMontoInput(egresoMonto, monedaSede)}
+                            onChange={(e) => setEgresoMonto(String(parseMontoInput(e.target.value, monedaSede)))}
                             className={INPUT_CLASS}
                           />
                         </div>
@@ -2386,10 +2387,10 @@ export default function CierreCajaPage() {
                         <div>
                           <label className={FIELD_LABEL_CLASS}>Cantidad</label>
                           <Input
-                            type="number"
-                            min="0"
-                            value={ingresoMonto}
-                            onChange={(e) => setIngresoMonto(e.target.value)}
+                            type="text"
+                            inputMode="decimal"
+                            value={formatMontoInput(ingresoMonto, monedaSede)}
+                            onChange={(e) => setIngresoMonto(String(parseMontoInput(e.target.value, monedaSede)))}
                             className={INPUT_CLASS}
                           />
                         </div>
