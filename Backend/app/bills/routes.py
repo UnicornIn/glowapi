@@ -38,6 +38,8 @@ from app.commissions.comision_context import construir_contexto, recalcular_comi
 from app.scheduling.submodules.quotes.paquetes_helpers import (
     procesar_paquete_servicio,
     propagar_facturacion_a_paquete,
+    sincronizar_paquetes,
+    contexto_facturacion_paquete,
 )
 
 router = APIRouter()
@@ -468,7 +470,38 @@ async def _ejecutar_anulacion(
             print(f"📅 Cita {origen_id} vuelta a 'finalizado' por anulación de factura")
         except Exception as e:
             print(f"⚠️ No se pudo actualizar cita {origen_id}: {e}")
- 
+
+    # 6️⃣ Paquetes de sesiones: si esta era la factura del paquete, las
+    # sesiones que la heredaron dejan de estar "Facturada" también.
+    if numero_comprobante:
+        try:
+            paquetes_facturados = await collection_client_packages.find(
+                {"facturacion.numero_comprobante": numero_comprobante}, {"paquete_id": 1}
+            ).to_list(None)
+            if paquetes_facturados:
+                paquete_ids = [p["paquete_id"] for p in paquetes_facturados]
+                await collection_client_packages.update_many(
+                    {"paquete_id": {"$in": paquete_ids}}, {"$unset": {"facturacion": ""}}
+                )
+                filtro_sesiones = {
+                    "numero_comprobante": numero_comprobante,
+                    "servicios.paquete_id": {"$in": paquete_ids},
+                }
+                await collection_citas.update_many(
+                    {**filtro_sesiones, "estado": "completada"},
+                    {"$set": {"estado": "finalizado"}},
+                )
+                await collection_citas.update_many(
+                    filtro_sesiones,
+                    {
+                        "$set": {"estado_factura": "pendiente"},
+                        "$unset": {"numero_comprobante": "", "fecha_facturacion": "", "facturado_por": ""},
+                    },
+                )
+                await sincronizar_paquetes(paquete_ids)
+        except Exception as e:
+            print(f"⚠️ No se pudo revertir la facturación del paquete: {e}")
+
     return {
         "productos_revertidos": len(movimientos_inv),
         "comisiones_afectadas": comisiones_afectadas,
@@ -499,12 +532,24 @@ async def facturar_cita_o_venta(
     # ====================================
     # 1️⃣ BUSCAR Y VALIDAR DOCUMENTO
     # ====================================
+    paquete_ctx = None
     if tipo == "cita":
         documento = await collection_citas.find_one({"_id": ObjectId(id)})
         if not documento:
             raise HTTPException(status_code=404, detail="Cita no encontrada")
         if documento.get("estado_factura") == "facturado":
             raise HTTPException(status_code=400, detail="La cita ya está facturada")
+        # ⭐ Paquete de sesiones = UNA venta: una sesión no se factura sola;
+        # la cita de compra se factura con lo pagado en todas las sesiones.
+        paquete_ctx = await contexto_facturacion_paquete(documento)
+        if paquete_ctx and paquete_ctx["rol"] == "sesion":
+            raise HTTPException(status_code=400, detail=paquete_ctx["mensaje"])
+        if paquete_ctx and paquete_ctx["pagos_sin_cita"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El paquete tiene {paquete_ctx['pagos_sin_cita']} pago(s) guardados solo en el paquete (no aparecen en caja). "
+                       "Pásalos a una sesión o descártalos como duplicados antes de facturar.",
+            )
         print("✅ Cita lista para facturar")
     else:
         documento = await collection_sales.find_one({"_id": ObjectId(id)})
@@ -695,6 +740,19 @@ async def facturar_cita_o_venta(
             "comision": comision_servicio
         })
 
+    # ⭐ Paquete: si alguna sesión suelta ya se facturó por su cuenta (antes
+    # de asociarla al paquete), ese valor ya está en otra factura — se
+    # descuenta de la línea del paquete para no facturarlo dos veces.
+    if paquete_ctx and paquete_ctx["ya_facturado"]:
+        linea_items = [it for it in items if it.get("tipo") == "servicio"]
+        idx_linea = paquete_ctx["indice_linea"]
+        if idx_linea < len(linea_items):
+            item_paquete = linea_items[idx_linea]
+            descontar = round(sum(f["valor"] for f in paquete_ctx["ya_facturado"]), 2)
+            comprobantes = ", ".join(str(f["numero_comprobante"]) for f in paquete_ctx["ya_facturado"])
+            item_paquete["subtotal"] = max(round(item_paquete["subtotal"] - descontar, 2), 0)
+            item_paquete["nombre"] = f"{item_paquete['nombre']} (descontado {descontar} ya facturado en sesiones: {comprobantes})"
+
     # ====================================
     # 4️⃣ PREPARAR ITEMS - PRODUCTOS
     # ====================================
@@ -872,8 +930,11 @@ async def facturar_cita_o_venta(
     # 7️⃣ HISTORIAL Y DESGLOSE DE PAGOS
     # ====================================
     historial_pagos = documento.get("historial_pagos", [])
+    if paquete_ctx:
+        # Todo lo pagado en cualquier sesión del paquete (con su fecha).
+        historial_pagos = paquete_ctx["pagos"]
     if not historial_pagos:
-        raise ValueError("No se puede facturar sin historial de pagos")
+        raise HTTPException(status_code=400, detail="No se puede facturar: la cita no tiene pagos registrados")
 
     desglose_pagos = {}
     total_pagado = 0.0
@@ -888,8 +949,10 @@ async def facturar_cita_o_venta(
     desglose_pagos["total"] = round(total_pagado, 2)
 
     if round(total_pagado, 2) < round(total_final, 2):
-        raise ValueError(
-            f"Pago insuficiente: pagado={total_pagado}, total_factura={total_final}"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pago insuficiente: pagado {round(total_pagado, 2)} de {round(total_final, 2)}. "
+                   + ("Registra el saldo del paquete desde la pestaña Pagos de cualquiera de sus sesiones." if paquete_ctx else ""),
         )
 
     # ====================================
@@ -952,7 +1015,9 @@ async def facturar_cita_o_venta(
                 "estado": "completada",
                 "estado_pago": "pagado",
                 "saldo_pendiente": 0,
-                "abono": total_final,
+                # La cita de compra de un paquete conserva su propio abono: el
+                # resto se pagó en otras sesiones (cada una guarda el suyo).
+                "abono": documento.get("abono", 0) if paquete_ctx else total_final,
                 "fecha_facturacion": fecha_actual,
                 "numero_comprobante": numero_comprobante,
                 "facturado_por": current_user.get("email"),
@@ -965,6 +1030,20 @@ async def facturar_cita_o_venta(
         # su propia cita en la agenda — propagar "Facturada" a las demás
         # citas del mismo paquete para que la agenda quede visualmente
         # consistente (ver docstring de propagar_facturacion_a_paquete).
+        # Las sesiones cuyos pagos entraron en esta factura quedan facturadas
+        # con ella — si no, caja contaría esos pagos dos veces (en la cita
+        # sin facturar y en la factura).
+        for sesion in (paquete_ctx or {}).get("citas_con_pagos", []):
+            set_sesion = {
+                "estado_factura": "facturado",
+                "numero_comprobante": numero_comprobante,
+                "fecha_facturacion": fecha_actual,
+                "facturado_por": current_user.get("email"),
+            }
+            if (sesion.get("estado") or "").lower() == "finalizado":
+                set_sesion["estado"] = "completada"
+            await collection_citas.update_one({"_id": sesion["_id"]}, {"$set": set_sesion})
+
         propagadas = await propagar_facturacion_a_paquete(
             servicios_cita=documento.get("servicios", []),
             cita_id_facturada=id,
