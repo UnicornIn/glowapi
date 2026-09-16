@@ -11,6 +11,8 @@ import { ClientSearch } from '../../pages/PageSuperAdmin/Appoinment/Clients/Clie
 import { crearCita } from './citasApi';
 import { PAYMENT_METHOD_OPTIONS } from '../../lib/payment-methods';
 import { getStoredCurrency } from '../../lib/currency';
+import { formatMontoInput, montoSospechoso, parseMontoInput } from '../../lib/money-input';
+import { confirmAction } from '../ui/confirm-dialog';
 
 interface EstilistaCompleto extends Estilista {
   servicios_no_presta: string[];
@@ -484,15 +486,23 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
     const id = s.servicio_id || s._id;
     if (serviciosSeleccionados.some(x => x.servicio_id === id)) return;
     const price = s.precio_local ?? s.precio ?? 0;
+    // Si el cliente tiene un paquete con sesiones disponibles para este
+    // servicio, se propone usarlo por defecto (se puede cambiar a "precio
+    // normal"). Antes quedaba en precio normal y era fácil olvidar el
+    // selector — esas citas quedaban por fuera del paquete.
+    const paquete = paquetesCliente.find(
+      p => p.servicio_id === id && p.activo && (p.sesiones_disponibles ?? p.sesiones_restantes) > 0
+    );
     setServiciosSeleccionados(prev => [...prev, {
       servicio_id: id,
       nombre: s.nombre,
       duracion: s.duracion_minutos || s.duracion || 30,
       precio_base: price,
       precio_personalizado: null,
-      precio_final: price,
+      precio_final: paquete ? 0 : price,
+      ...(paquete ? { paquete_id: paquete.paquete_id, comprar_paquete_sesiones: null } : {}),
     }]);
-  }, [serviciosSeleccionados]);
+  }, [serviciosSeleccionados, paquetesCliente]);
 
   const removeService = useCallback((id: string) => {
     setServiciosSeleccionados(prev => prev.filter(s => s.servicio_id !== id));
@@ -501,7 +511,7 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
   const updateServicePrice = useCallback((id: string, val: string) => {
     setServiciosSeleccionados(prev => prev.map(s => {
       if (s.servicio_id !== id) return s;
-      const p = val ? parseFloat(val) : null;
+      const p = val ? parseMontoInput(val, currency) : null;
       // Si esta línea está comprando un paquete de sesiones, el precio "de
       // base" para volver atrás (input vacío) es el de esa opción de
       // paquete, no el precio normal del servicio.
@@ -518,7 +528,7 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
   // Paquete de sesiones activo (con saldo) que cubre este servicio, si existe.
   const findPaqueteParaServicio = useCallback(
     (servicioId: string) => paquetesCliente.find(
-      p => p.servicio_id === servicioId && p.activo && p.sesiones_restantes > 0
+      p => p.servicio_id === servicioId && p.activo && (p.sesiones_disponibles ?? p.sesiones_restantes) > 0
     ),
     [paquetesCliente]
   );
@@ -583,10 +593,20 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
   // Submit
   const handleSubmit = async () => {
     if (!selectedClient || !selectedStylist || !selectedDate) return;
+    // "10.000" es diez mil (punto de miles), no 10 — ver lib/money-input.
+    const parsedAbono = parseMontoInput(abonoAmount, currency);
+    if (!isPreCita && montoSospechoso(parsedAbono, currency)) {
+      const ok = await confirmAction({
+        title: 'Abono muy bajo',
+        message: `El abono es de ${currency} ${parsedAbono}. ¿Es correcto? Si querías escribir miles, corrígelo (ej. 10000).`,
+        confirmLabel: 'Sí, es correcto',
+        variant: 'danger',
+      });
+      if (!ok) return;
+    }
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const parsedAbono = Number(abonoAmount) || 0;
       // El backend ya decide pre-cita vs. confirmada por el campo `estado` (ver abajo),
       // no por abono > 0 — no hace falta forzar un abono falso para "confirmada".
       const abonoToSend = isPreCita ? 0 : parsedAbono;
@@ -748,8 +768,9 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
                           </span>
                         ) : (
                           <input
-                            type="number"
-                            value={s.precio_personalizado !== null ? s.precio_personalizado : s.precio_final}
+                            type="text"
+                            inputMode="decimal"
+                            value={formatMontoInput(s.precio_personalizado !== null ? s.precio_personalizado : s.precio_final, currency)}
                             onChange={e => updateServicePrice(s.servicio_id, e.target.value)}
                             className="w-20 border border-gray-200 rounded px-1.5 py-1 text-[10px] text-right focus:outline-none focus:border-gray-700"
                           />
@@ -767,7 +788,7 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
                           <option value="normal">Precio normal ({currency} {s.precio_base})</option>
                           {paquete && (
                             <option value="canjear">
-                              Usar sesión del paquete (quedan {paquete.sesiones_restantes} de {paquete.sesiones_totales})
+                              Usar sesión del paquete (disponibles {paquete.sesiones_disponibles ?? paquete.sesiones_restantes} de {paquete.sesiones_totales})
                             </option>
                           )}
                           {tiers.map(t => (
@@ -926,8 +947,9 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
                   <div className="relative">
                     <span className="absolute left-3 top-2.5 text-xs text-gray-500">{currency}</span>
                     <input
-                      type="number"
-                      value={abonoAmount}
+                      type="text"
+                      inputMode="decimal"
+                      value={formatMontoInput(abonoAmount, currency)}
                       onChange={e => setAbonoAmount(e.target.value)}
                       placeholder="0"
                       className="w-full border border-gray-300 rounded-lg pl-12 pr-3 py-2.5 text-sm focus:ring-1 focus:ring-gray-900 focus:border-gray-900 outline-none"
@@ -1012,8 +1034,8 @@ const AppointmentScheduler: React.FC<AppointmentSchedulerProps> = ({
             </div>
             <div>
               Total: <span className="font-semibold text-gray-900">{currency} {montoTotal}</span>
-              {showAbono && !isPreCita && Number(abonoAmount) > 0 && (
-                <> · Abono: {currency} {abonoAmount}</>
+              {showAbono && !isPreCita && parseMontoInput(abonoAmount, currency) > 0 && (
+                <> · Abono: {currency} {formatMontoInput(abonoAmount, currency)}</>
               )}
               {isPreCita && <> · <span className="text-amber-600 font-semibold">Pre-cita</span></>}
             </div>

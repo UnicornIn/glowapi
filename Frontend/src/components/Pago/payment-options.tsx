@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { formatMontoInput, parseMontoInput } from "../../lib/money-input";
 import { DollarSign, AlertCircle, CreditCard, ShieldCheck } from "lucide-react"
 
 interface PaymentOptionsProps {
@@ -252,9 +253,10 @@ export function PaymentOptions({
                             {currency}
                         </div>
                         <input
-                            type="number"
-                            value={depositAmount}
-                            onChange={(e) => handleDepositChange(e.target.value)}
+                            type="text"
+                            inputMode="decimal"
+                            value={formatMontoInput(depositAmount, currency)}
+                            onChange={(e) => handleDepositChange(String(parseMontoInput(e.target.value, currency)))}
                             onBlur={() => {
                                 const value = parseFloat(depositAmount) || 0
                                 if (value < minimumRecommended) {

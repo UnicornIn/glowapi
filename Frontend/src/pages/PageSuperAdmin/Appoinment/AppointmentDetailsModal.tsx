@@ -42,6 +42,9 @@ import {
   corregirPagoPaquete,
   type PaqueteCliente,
 } from "../../../components/Quotes/clientsService";
+import PaqueteSesionesPanel from "../../../components/Quotes/PaqueteSesionesPanel";
+import PagosPaqueteHistorial from "../../../components/Quotes/PagosPaqueteHistorial";
+import { formatMontoInput, montoSospechoso, parseMontoInput } from "../../../lib/money-input";
 import { API_BASE_URL } from "../../../types/config";
 import type { Cliente } from "../../../types/cliente";
 import TimeInputWithPicker from "../../../components/ui/time-input-with-picker";
@@ -92,6 +95,8 @@ interface AppointmentDetailsModalProps {
   onRefresh?: () => void;
   /** When true, renders content directly (no centered Modal wrapper) for use in a side panel */
   panelMode?: boolean;
+  /** Abrir otra cita (ej. otra sesión del mismo paquete) en este mismo detalle */
+  onAbrirCita?: (cita: any) => void;
 }
 
 interface PagoModalData {
@@ -456,6 +461,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   appointment,
   onRefresh,
   panelMode = false,
+  onAbrirCita,
 }) => {
   const { user } = useAuth();
   const [updating, setUpdating] = useState(false);
@@ -1337,8 +1343,6 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   };
 
   const shouldDisableActions = () => {
-    const pagosData = getPagosData();
-
     if (updating || savingServicios) return true;
 
     if (
@@ -1349,11 +1353,14 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       return true;
     }
 
-    if (pagosData?.estaPagadoCompleto) {
-      return true;
-    }
-
-    if (appointmentDetails?.estado?.toLowerCase() === "completada") {
+    // Solo el estado decide. Antes también se ocultaban si la cita estaba
+    // pagada — y una sesión de paquete siempre figura pagada (el paquete ya
+    // se pagó), así que Cancelar/No asistió desaparecían en todas las
+    // sesiones. Cancelar una cita pagada ya traslada el abono a saldo a favor.
+    if (
+      ["completada", "finalizado"].includes(appointmentDetails?.estado?.toLowerCase()) ||
+      appointmentDetails?.rawData?.estado_factura === "facturado"
+    ) {
       return true;
     }
 
@@ -1512,7 +1519,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
     const original = paqueteVinculado
       ? paqueteVinculado.historial_pagos?.[indiceOriginal]
       : appointmentDetails?.rawData?.historial_pagos?.[indiceOriginal];
-    const montoNumero = Number(montoEditado);
+    const montoNumero = parseMontoInput(montoEditado, userCurrency);
     if (!montoNumero || montoNumero <= 0) {
       toast.error("El monto debe ser mayor a 0");
       return;
@@ -1674,6 +1681,16 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       return;
     }
 
+    if (montoSospechoso(pagoModal.monto, userCurrency)) {
+      const okMonto = await confirmAction({
+        title: "Monto muy bajo",
+        message: `El pago es de $${pagoModal.monto}. ¿Es correcto? Si querías escribir miles, corrígelo (ej. 10000).`,
+        confirmLabel: "Sí, es correcto",
+        variant: "danger",
+      });
+      if (!okMonto) return;
+    }
+
     const pagosData = getPagosData();
 
     if (pagoModal.monto > pagosData.saldoPendiente) {
@@ -1689,12 +1706,9 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
       toast.error("Debes ingresar el código de la Gift Card para registrar el pago");
       return;
     }
-    if (
-      paqueteVinculado &&
-      (metodoPagoSeguro === "giftcard" || metodoPagoSeguro === "saldo_a_favor")
-    ) {
+    if (paqueteVinculado && metodoPagoSeguro === "giftcard") {
       toast.error(
-        "Un pago del paquete no admite giftcard ni saldo a favor — usa efectivo, transferencia u otro método directo.",
+        "Un pago del paquete no admite giftcard — usa efectivo, transferencia, saldo a favor u otro método.",
       );
       return;
     }
@@ -1715,7 +1729,8 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
         const paqueteActualizado = await registrarPagoPaquete(
           user.access_token,
           paqueteVinculado.paquete_id,
-          { monto: pagoModal.monto, metodo: metodoPagoSeguro },
+          // El pago queda guardado en esta sesión (caja lo ve) y suma al paquete.
+          { monto: pagoModal.monto, metodo: metodoPagoSeguro, cita_id: String(appointmentDetails.id) },
         );
         setPaqueteVinculado(paqueteActualizado);
         toast.success(
@@ -1865,7 +1880,9 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
     servicioId: string,
     precioInput: string,
   ) => {
-    const normalizado = precioInput.replace(",", ".").trim();
+    // "160.000" es ciento sesenta mil (punto de miles), no 160 — lib/money-input.
+    const normalizado =
+      String(precioInput).trim() === "" ? "" : String(parseMontoInput(precioInput, userCurrency));
 
     setServiciosSeleccionados((prev) =>
       prev.map((servicio) => {
@@ -1900,10 +1917,17 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   // existe — mismo mecanismo que AppointmentForm.tsx ("Nueva Cita"), pero
   // acá se ofrece también al EDITAR servicios de una cita ya creada
   // (incluidas ya finalizadas — ver editar_cita en el backend).
+  // Si la línea ya usa un paquete, ese (aunque ya no le queden sesiones
+  // libres — esta cita ocupa una); si no, uno con sesiones disponibles
+  // (descontando las ya agendadas).
   const findPaqueteParaServicio = useCallback(
-    (servicioId: string) =>
+    (servicioId: string, paqueteIdActual?: string | null) =>
+      (paqueteIdActual && paquetesCliente.find((p) => p.paquete_id === paqueteIdActual)) ||
       paquetesCliente.find(
-        (p) => p.servicio_id === servicioId && p.activo && p.sesiones_restantes > 0,
+        (p) =>
+          p.servicio_id === servicioId &&
+          p.activo &&
+          (p.sesiones_disponibles ?? p.sesiones_restantes) > 0,
       ),
     [paquetesCliente],
   );
@@ -2002,7 +2026,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
     productoId: string,
     precioInput: string,
   ) => {
-    const precio = Math.max(0, roundMoney(toNumber(precioInput)));
+    const precio = Math.max(0, roundMoney(parseMontoInput(precioInput, userCurrency)));
     setProductos((prev) =>
       prev.map((producto) => {
         if (producto.producto_id !== productoId) return producto;
@@ -2390,15 +2414,14 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
               $
             </span>
             <input
-              type="number"
-              min="0"
-              max={maxMonto}
-              step="0.01"
-              value={pagoModal.monto || ""}
+              type="text"
+              inputMode="decimal"
+              value={formatMontoInput(pagoModal.monto || "", userCurrency)}
               onChange={(e) =>
                 setPagoModal((prev) => ({
                   ...prev,
-                  monto: parseFloat(e.target.value) || 0,
+                  // "10.000" = diez mil, no 10 (ver lib/money-input)
+                  monto: parseMontoInput(e.target.value, userCurrency),
                 }))
               }
               className="flex-1 bg-transparent text-sm font-medium focus:outline-none focus:ring-0 border-0 p-0"
@@ -2620,7 +2643,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                       type="text"
                       inputMode="decimal"
                       pattern="[0-9]*[.,]?[0-9]*"
-                      value={producto.precio_unitario}
+                      value={formatMontoInput(producto.precio_unitario, userCurrency)}
                       onChange={(e) =>
                         handleActualizarPrecioProducto(
                           producto.producto_id,
@@ -2906,7 +2929,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                         type="text"
                         inputMode="decimal"
                         pattern="[0-9]*[.,]?[0-9]*"
-                        value={servicio.precio_unitario_input}
+                        value={formatMontoInput(servicio.precio_unitario_input, userCurrency)}
                         onChange={(e) =>
                           handleActualizarPrecioServicio(
                             servicio.servicio_id,
@@ -2928,7 +2951,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                     para este servicio, o el servicio tiene opciones de
                     paquete configuradas). */}
                 {(() => {
-                  const paqueteExistente = findPaqueteParaServicio(servicio.servicio_id);
+                  const paqueteExistente = findPaqueteParaServicio(servicio.servicio_id, servicio.paquete_id);
                   const servicioCompleto = serviciosDisponibles.find(
                     (sv) => sv.servicio_id === servicio.servicio_id,
                   );
@@ -2936,10 +2959,11 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                   if (!paqueteExistente && tiers.length === 0 && !servicio.paquete_id) {
                     return null;
                   }
-                  const modoActual = servicio.paquete_id
-                    ? "canjear"
-                    : servicio.comprar_paquete_sesiones
-                      ? `comprar:${servicio.comprar_paquete_sesiones}`
+                  // La cita que COMPRA el paquete también queda con paquete_id.
+                  const modoActual = servicio.comprar_paquete_sesiones
+                    ? `comprar:${servicio.comprar_paquete_sesiones}`
+                    : servicio.paquete_id
+                      ? "canjear"
                       : "normal";
                   return (
                     <select
@@ -2953,7 +2977,9 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                       <option value="normal">Precio normal (${servicio.precio_base})</option>
                       {paqueteExistente && (
                         <option value="canjear">
-                          Usar sesión del paquete (quedan {paqueteExistente.sesiones_restantes} de {paqueteExistente.sesiones_totales})
+                          {servicio.paquete_id === paqueteExistente.paquete_id
+                            ? `Sesión ${servicio.numero_sesion ?? "–"} de ${paqueteExistente.sesiones_totales} del paquete (${paqueteExistente.sesiones_usadas} realizadas · ${paqueteExistente.sesiones_disponibles ?? paqueteExistente.sesiones_restantes} libres)`
+                            : `Usar sesión del paquete (${paqueteExistente.sesiones_disponibles ?? paqueteExistente.sesiones_restantes} disponibles de ${paqueteExistente.sesiones_totales})`}
                         </option>
                       )}
                       {tiers.map((t) => (
@@ -2967,7 +2993,7 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
 
                 {typeof servicio.numero_sesion === "number" && (
                   <p className="mt-1 text-[10px] text-purple-600">
-                    Sesión {servicio.numero_sesion} consumida del paquete
+                    Sesión {servicio.numero_sesion} del paquete
                   </p>
                 )}
               </div>
@@ -3552,6 +3578,28 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                   {/* ─ TAB: CITA ─────────────────────────────────────────── */}
                   {activeTab === "cita" && (
                     <>
+                      {user?.access_token && appointmentDetails?.id && (
+                        <PaqueteSesionesPanel
+                          token={user.access_token}
+                          citaId={String(appointmentDetails.id)}
+                          paqueteIdVinculado={paqueteIdVinculado}
+                          paquetesCandidatos={
+                            paqueteIdVinculado
+                              ? []
+                              : paquetesCliente.filter((p) =>
+                                  (appointmentDetails?.rawData?.servicios || []).some(
+                                    (s: any) => s?.servicio_id === p.servicio_id && !s?.comprar_paquete_sesiones,
+                                  ),
+                                )
+                          }
+                          puedeGestionar={["super_admin", "admin_sede"].includes(
+                            String((user as any)?.rol || user?.role || ""),
+                          )}
+                          onAbrirCita={onAbrirCita}
+                          onCambio={() => onRefresh?.()}
+                        />
+                      )}
+
                       {/* Professional card */}
                       <section>
                         <p
@@ -3806,9 +3854,9 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                         >
                           Esta sesión pertenece al paquete "
                           {pagosData.nombrePaquete || "de sesiones"}". El
-                          abonado y el historial de abajo son del paquete
-                          completo — registrar o corregir un pago acá lo
-                          actualiza sin importar desde cuál sesión se abra.
+                          abonado es la suma de lo pagado en todas sus
+                          sesiones. Un pago registrado acá queda en esta
+                          sesión (aparece en caja hoy) y abona al paquete.
                         </div>
                       )}
 
@@ -3966,7 +4014,25 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                         >
                           Historial de pagos
                         </p>
-                        {pagosData.pagos.length > 0 ? (
+                        {pagosData.esPagoDePaquete && paqueteVinculado && user?.access_token ? (
+                          <PagosPaqueteHistorial
+                            token={user.access_token}
+                            paquete={paqueteVinculado}
+                            citaActualId={String(appointmentDetails?.id || "")}
+                            puedeGestionar={["super_admin", "admin_sede"].includes(
+                              String((user as any)?.rol || user?.role || ""),
+                            )}
+                            formatMonto={fmtM}
+                            moneda={userCurrency}
+                            onPaqueteActualizado={(p) => {
+                              setPaqueteVinculado(p);
+                              onRefresh?.();
+                            }}
+                            onCorregirPagoCita={(citaId, indice, cambios) =>
+                              corregirPago(citaId, indice, cambios, user.access_token)
+                            }
+                          />
+                        ) : pagosData.pagos.length > 0 ? (
                           <div className="space-y-2">
                             {pagosData.pagos.map((pago: any, idx: number) => {
                               const esPagoCompleto =
@@ -4065,10 +4131,9 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                                         ))}
                                       </select>
                                       <input
-                                        type="number"
-                                        min="0.01"
-                                        step="0.01"
-                                        value={montoEditado}
+                                        type="text"
+                                        inputMode="decimal"
+                                        value={formatMontoInput(montoEditado, userCurrency)}
                                         onChange={(e) => setMontoEditado(e.target.value)}
                                         className="text-xs rounded-md px-2 py-1 w-24"
                                         style={{ border: "1px solid #E2E8F0" }}
