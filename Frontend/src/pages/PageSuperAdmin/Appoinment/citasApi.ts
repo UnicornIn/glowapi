@@ -203,6 +203,30 @@ export const eliminarCita = async (citaId: string, token: string) => {
 // registrar el pago (método incorrecto o monto mal tipeado). El backend
 // recalcula abono/saldo_pendiente/estado_pago cuando cambia el monto, y
 // bloquea la corrección si la cita ya fue facturada.
+// Elimina UN pago del historial de la cita (el cliente al final no lo pagó).
+// Los demás pagos quedan intactos; el backend recalcula abono y saldo, y
+// guarda el registro eliminado con su motivo.
+export const eliminarPagoCita = async (
+  citaId: string,
+  indice: number,
+  motivo: string,
+  token: string
+) => {
+  const response = await fetch(
+    `${API_BASE_URL}scheduling/quotes/${citaId}/pagos/${indice}?motivo=${encodeURIComponent(motivo)}`,
+    {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` },
+    }
+  );
+
+  if (!response.ok) {
+    throw await buildApiRequestError(response, 'Error al eliminar el pago');
+  }
+
+  return await response.json();
+};
+
 export const corregirPago = async (
   citaId: string,
   indice: number,

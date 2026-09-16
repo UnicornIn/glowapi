@@ -2997,6 +2997,111 @@ async def corregir_pago(
         "estado_pago": update_set.get("estado_pago"),
     }
 
+
+# =============================================================
+# 🔹 ELIMINAR UN PAGO DEL HISTORIAL (registro por registro)
+# =============================================================
+# Para el caso real de que se registre un pago que al final el cliente no
+# hizo (ej. quedó de pagar el saldo y no pagó). Antes la única salida era
+# "corregir" ese pago a un monto simbólico como $10 — quedaba basura en el
+# historial, en caja y en el abonado del cliente.
+#
+# Se borra SOLO ese registro: los demás pagos de la cita quedan intactos y
+# se recalculan abono, saldo y estado de pago. El registro no se pierde,
+# queda en `pagos_eliminados` con quién lo eliminó, cuándo y por qué.
+@router.delete("/{cita_id}/pagos/{indice}", response_model=dict)
+async def eliminar_pago(
+    cita_id: str,
+    indice: int,
+    motivo: str = Query(..., min_length=3, description="Por qué se elimina (queda auditado)"),
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user.get("rol") not in ["super_admin", "admin_sede"]:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede eliminar un pago")
+
+    cita = await resolve_cita_by_id(cita_id)
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+
+    if current_user.get("rol") == "admin_sede" and cita.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes eliminar pagos de tu propia sede")
+
+    if cita.get("estado_factura") == "facturado":
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar un pago de una cita ya facturada. Anula la factura primero.",
+        )
+
+    if cita.get("abono_trasladado"):
+        raise HTTPException(
+            status_code=400,
+            detail="El abono de esta cita cancelada ya pasó a saldo a favor del cliente. "
+                   "Ajusta el saldo a favor en vez de eliminar el pago.",
+        )
+
+    historial_pagos = list(cita.get("historial_pagos") or [])
+    if indice < 0 or indice >= len(historial_pagos):
+        raise HTTPException(status_code=404, detail="Pago no encontrado en el historial de esta cita")
+
+    pago = historial_pagos[indice]
+    metodo_pago = (pago.get("metodo") or "").lower().strip()
+    if metodo_pago in ("giftcard", "saldo_a_favor"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"No se puede eliminar un pago con '{metodo_pago}': ya movió saldo en otra parte "
+                   "(giftcard o crédito del cliente). Revierte ese movimiento primero.",
+        )
+
+    historial_pagos.pop(indice)
+
+    # Recalcular desde los pagos que quedan (no se toca ninguno más).
+    valor_total = round(float(cita.get("valor_total", 0) or 0), 2)
+    nuevo_abono = round(sum(float(p.get("monto", 0) or 0) for p in historial_pagos), 2)
+    nuevo_saldo = max(round(valor_total - nuevo_abono, 2), 0)
+    for i, p in enumerate(historial_pagos):
+        acumulado = round(sum(float(x.get("monto", 0) or 0) for x in historial_pagos[: i + 1]), 2)
+        p["saldo_despues"] = max(round(valor_total - acumulado, 2), 0)
+    if historial_pagos:
+        historial_pagos[0]["tipo"] = (
+            "pago_completo" if historial_pagos[0].get("saldo_despues", 0) <= 0 else "abono_inicial"
+        )
+
+    await collection_citas.update_one(
+        {"_id": cita["_id"]},
+        {
+            "$set": {
+                "historial_pagos": historial_pagos,
+                "abono": nuevo_abono,
+                "saldo_pendiente": nuevo_saldo,
+                # Mismo criterio que el resto del sistema: una sesión de
+                # paquete vale $0 y queda "pagado" aunque no tenga pagos propios.
+                "estado_pago": (
+                    "pagado" if nuevo_saldo <= 0
+                    else "abonado" if nuevo_abono > 0
+                    else "pendiente"
+                ),
+                "ultima_actualizacion": datetime.now(),
+            },
+            "$push": {"pagos_eliminados": {
+                **pago,
+                "motivo": motivo,
+                "eliminado_por": current_user.get("email"),
+                "eliminado_en": datetime.now(),
+            }},
+        },
+    )
+
+    # Si la cita es de un paquete, su abonado es la suma de las sesiones.
+    await sincronizar_paquetes(paquete_ids_de_servicios(cita.get("servicios")))
+
+    return {
+        "success": True,
+        "mensaje": f"Pago de {pago.get('monto')} eliminado del historial",
+        "abono": nuevo_abono,
+        "saldo_pendiente": nuevo_saldo,
+        "pagos_restantes": len(historial_pagos),
+    }
+
 # =============================================================
 # 🔹 MOSTRAR PAGO ACTUALIZADO
 # =============================================================
