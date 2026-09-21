@@ -1,12 +1,13 @@
 "use client"
 
 import { useState, useEffect, useMemo } from "react"
-import { ShoppingBag, Search, FileText, Building } from "lucide-react"
+import { ShoppingBag, Search, FileText, Building, Package } from "lucide-react"
 import { Sidebar } from "../../../components/Layout/Sidebar"
 import { Button } from "../../../components/ui/button"
 import { Skeleton } from "../../../components/ui/skeleton"
 import { FacturaDetailModal } from "../../PageSede/Sales-invoiced/factura-detail-modal"
 import { DirectSaleModal } from "../../PageSede/Billing/DirectSaleModal"
+import { ComisionesPaquetesModal } from "../../PageSede/Billing/ComisionesPaquetesModal"
 import { ServiceProtocol } from "../../PageSede/Billing/service-protocol"
 import type { Factura } from "../../../types/factura"
 import { DEFAULT_PERIOD } from "../../../lib/period"
@@ -177,6 +178,7 @@ export default function SuperAdminBilling() {
   const [showFacturaModal, setShowFacturaModal] = useState(false)
   const [cachedFacturas, setCachedFacturas] = useState<Factura[]>([])
   const [showDirectSaleModal, setShowDirectSaleModal] = useState(false)
+  const [showComisionesPaquetes, setShowComisionesPaquetes] = useState(false)
   const [metricsRefreshKey, setMetricsRefreshKey] = useState(0)
 
   const appliedRange = useMemo(() => getGlobalRange(period, dateRange), [period, dateRange])
@@ -533,6 +535,19 @@ export default function SuperAdminBilling() {
         onSaleCompleted={() => { setMetricsRefreshKey((k) => k + 1); void fetchAppointments() }}
       />
 
+      <ComisionesPaquetesModal
+        isOpen={showComisionesPaquetes}
+        onClose={() => setShowComisionesPaquetes(false)}
+        desde={appliedRange.start_date}
+        hasta={appliedRange.end_date}
+        periodoLabel={periodRangeLabel}
+        sedeId={(() => {
+          if (selectedSedeId === "todas") return undefined
+          const found = sedes.find((s) => s._id === selectedSedeId || s.sede_id === selectedSedeId)
+          return found ? getSedeApiId(found) : undefined
+        })()}
+      />
+
       <div className="flex flex-col h-screen bg-white">
         <Sidebar />
         <div className="flex flex-1 min-h-0">
@@ -551,6 +566,13 @@ export default function SuperAdminBilling() {
                 >
                   <ShoppingBag className="h-3.5 w-3.5" />
                   Venta directa
+                </button>
+                <button
+                  onClick={() => setShowComisionesPaquetes(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  <Package className="h-3.5 w-3.5" />
+                  Comisiones paquetes
                 </button>
                 {/* Sede selector */}
                 <Building className="h-4 w-4 text-gray-400" />

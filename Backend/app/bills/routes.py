@@ -35,6 +35,7 @@ from app.commissions.comision_engine import (
     resolver_config_comision, calcular_comision
 )
 from app.commissions.comision_context import construir_contexto, recalcular_comisiones_periodo
+from app.commissions.comision_paquetes import porcentaje_comision_servicio, registrar_comision_servicios
 from app.scheduling.submodules.quotes.paquetes_helpers import (
     procesar_paquete_servicio,
     propagar_facturacion_a_paquete,
@@ -102,41 +103,8 @@ def obtener_porcentaje_comision_producto(
         return 0.0
 
 def _obtener_porcentaje_comision_servicio(servicio_db: dict, profesional_db: Optional[dict]) -> float:
-    """
-    Prioridad:
-    1) comisión por servicio específico (comisiones_por_servicio[servicio_id]
-       del profesional) — la más específica, gana si está configurada.
-    2) comisión por categoría del estilista (comisiones_por_categoria) —
-       respaldo cuando el servicio no tiene su propia comisión configurada.
-    3) 0, si ninguna de las dos aplica.
-
-    NOTA: `comision_estilista` (campo fijo en el propio documento del
-    servicio) está deprecado y ya NO se usa para resolver comisión — el
-    dato vive en el profesional, no en el servicio.
-    """
-    if not profesional_db:
-        return 0.0
-
-    servicio_id = servicio_db.get("servicio_id") or servicio_db.get("unique_id")
-    comisiones_servicio = profesional_db.get("comisiones_por_servicio") or {}
-    if servicio_id and isinstance(comisiones_servicio, dict) and servicio_id in comisiones_servicio:
-        try:
-            return float(comisiones_servicio[servicio_id])
-        except (TypeError, ValueError):
-            pass
-
-    comisiones_categoria = profesional_db.get("comisiones_por_categoria") or {}
-    categoria_servicio = _normalizar_categoria(servicio_db.get("categoria"))
-
-    if categoria_servicio and isinstance(comisiones_categoria, dict):
-        for categoria, porcentaje in comisiones_categoria.items():
-            if _normalizar_categoria(categoria) == categoria_servicio:
-                try:
-                    return float(porcentaje)
-                except (TypeError, ValueError):
-                    break
-
-    return 0.0
+    """Ver `porcentaje_comision_servicio` (compartido con las sesiones de paquete)."""
+    return porcentaje_comision_servicio(servicio_db, profesional_db)
 
 def _limpiar(obj):
     """Serializa ObjectId y datetime recursivamente."""
@@ -482,6 +450,13 @@ async def _ejecutar_anulacion(
                 paquete_ids = [p["paquete_id"] for p in paquetes_facturados]
                 await collection_client_packages.update_many(
                     {"paquete_id": {"$in": paquete_ids}}, {"$unset": {"facturacion": ""}}
+                )
+                # Las comisiones por sesión ya se revirtieron arriba (mismo
+                # numero_comprobante); se quita la marca para poder volver a
+                # liquidarlas si se refactura.
+                await collection_citas.update_many(
+                    {"comision_paquete.numero_comprobante": numero_comprobante},
+                    {"$unset": {"comision_paquete": ""}},
                 )
                 filtro_sesiones = {
                     "numero_comprobante": numero_comprobante,
@@ -1239,91 +1214,13 @@ async def facturar_cita_o_venta(
 
         # ─── Registrar comisión de SERVICIOS ───────────────────────────
         if servicios_comision and receptor_servicios_id:
-            total_comision_servicios_reg = round(
-                sum(s["valor_comision"] for s in servicios_comision), 2
+            comision_msg = await registrar_comision_servicios(
+                receptor_id=receptor_servicios_id,
+                receptor_nombre=receptor_servicios_nombre,
+                sede=sede,
+                servicios_comision=servicios_comision,
+                fecha_actual=fecha_actual,
             )
-            comision_doc_srv = await collection_commissions.find_one({
-                "profesional_id": receptor_servicios_id,
-                "sede_id": sede_id,
-                "estado": "pendiente"
-            })
-
-            crear_nuevo_srv = False
-            if comision_doc_srv:
-                existentes = comision_doc_srv.get("servicios_detalle", [])
-                if existentes and "periodo_inicio" not in comision_doc_srv:
-                    fechas_m = []
-                    for s in existentes:
-                        try:
-                            fechas_m.append(datetime.strptime(s["fecha"], "%Y-%m-%d"))
-                        except:
-                            continue
-                    if fechas_m:
-                        await collection_commissions.update_one(
-                            {"_id": comision_doc_srv["_id"]},
-                            {"$set": {
-                                "periodo_inicio": min(fechas_m).strftime("%Y-%m-%d"),
-                                "periodo_fin": max(fechas_m).strftime("%Y-%m-%d")
-                            }}
-                        )
-                if existentes:
-                    fechas = []
-                    for s in existentes:
-                        try:
-                            fechas.append(datetime.strptime(s["fecha"], "%Y-%m-%d"))
-                        except:
-                            continue
-                    if fechas:
-                        fi = min(min(fechas), fecha_actual)
-                        ff = max(max(fechas), fecha_actual)
-                        if (ff - fi).days + 1 > 15:
-                            crear_nuevo_srv = True
-                            await collection_commissions.update_one(
-                                {"_id": comision_doc_srv["_id"]},
-                                {"$set": {
-                                    "periodo_inicio": min(fechas).strftime("%Y-%m-%d"),
-                                    "periodo_fin": max(fechas).strftime("%Y-%m-%d")
-                                }}
-                            )
-
-            if comision_doc_srv and not crear_nuevo_srv:
-                ops = {
-                    "$inc": {"total_comisiones": total_comision_servicios_reg},
-                    "$set": {"estado": "pendiente", "periodo_fin": fecha_actual_str}
-                }
-                if "servicios_detalle" not in comision_doc_srv:
-                    ops["$set"]["servicios_detalle"] = servicios_comision
-                else:
-                    ops["$push"] = {"servicios_detalle": {"$each": servicios_comision}}
-                if "periodo_inicio" not in comision_doc_srv:
-                    ops["$set"]["periodo_inicio"] = fecha_actual_str
-                await collection_commissions.update_one({"_id": comision_doc_srv["_id"]}, ops)
-                doc_act = await collection_commissions.find_one({"_id": comision_doc_srv["_id"]})
-                if doc_act:
-                    await collection_commissions.update_one(
-                        {"_id": doc_act["_id"]},
-                        {"$set": {"total_comisiones": round(doc_act.get("total_comisiones", 0), 2)}}
-                    )
-                comision_msg = f"Comisión servicios actualizada (+{total_comision_servicios_reg} {moneda_sede})"
-            else:
-                await collection_commissions.insert_one({
-                    "profesional_id": receptor_servicios_id,
-                    "profesional_nombre": receptor_servicios_nombre,
-                    "sede_id": sede_id,
-                    "sede_nombre": sede.get("nombre", ""),
-                    "moneda": moneda_sede,
-                    "tipo_comision": tipo_comision,
-                    "total_servicios": len(servicios_comision),
-                    "total_productos": 0,
-                    "total_comisiones": total_comision_servicios_reg,
-                    "servicios_detalle": servicios_comision,
-                    "productos_detalle": [],
-                    "periodo_inicio": fecha_actual_str,
-                    "periodo_fin": fecha_actual_str,
-                    "estado": "pendiente",
-                    "creado_en": fecha_actual
-                })
-                comision_msg = f"Comisión servicios creada ({total_comision_servicios_reg} {moneda_sede})"
 
         # ─── Registrar comisión de PRODUCTOS ───────────────────────────
         if productos_comision and receptor_productos_id:

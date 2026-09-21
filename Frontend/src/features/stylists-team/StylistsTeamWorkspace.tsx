@@ -15,6 +15,7 @@ import {
 import { Sidebar } from "../../components/Layout/Sidebar";
 import { features } from "../../config/features";
 import { confirmAction } from '../../components/ui/confirm-dialog';
+import { toast } from "sonner";
 import { PageHeader } from "../../components/Layout/PageHeader";
 import { Button } from "../../components/ui/button";
 import { PeriodoSelector, type PeriodoId } from "../../components/ui/PeriodoSelector";
@@ -27,12 +28,6 @@ import type { SystemUser } from "../../types/system-user";
 import { formatSedeNombre } from "../../lib/sede";
 import { formatCurrencyNoDecimals, getStoredCurrency } from "../../lib/currency";
 import { formatDateDMY } from "../../lib/dateFormat";
-import {
-  buildCategoryCommissionPayload,
-  resolveCategoryCommissionEntries,
-  resolveServiceCommissions,
-  type ServiceCommissionEntry,
-} from "../../lib/serviceCommissions";
 import { getCitas } from "../../components/Quotes/citasApi";
 import { getHorariosEstilista } from "../../components/Quotes/horariosApi";
 import {
@@ -133,8 +128,15 @@ type EditorState = {
   comision: string;
   password: string;
   activo: boolean;
-  serviceIds: string[];
-  serviceCommissions: ServiceCommissionEntry[];
+  // Comisiones tal como se guardan en el profesional:
+  // - categoryCommissions: % por categoría (`comisiones_por_categoria`);
+  //   vacío = usa la comisión base.
+  // - serviceOverrides: % propio de un servicio (`comisiones_por_servicio`),
+  //   gana sobre el de su categoría; sin entrada = hereda la categoría.
+  // Antes el editor mostraba filas por servicio pero guardaba solo un % por
+  // categoría: al recargar, lo agregado por servicio desaparecía.
+  categoryCommissions: Record<string, string>;
+  serviceOverrides: Record<string, string>;
   productCommission: string;
   // Servicios que este profesional NO atiende — independiente de las
   // comisiones especiales: por defecto un profesional puede agendar
@@ -256,11 +258,50 @@ const getInitials = (name: string): string =>
     .join("") || "ST";
 
 const parseCommissionValue = (value: string): number | null => {
-  const raw = value.trim();
+  // "12,5" también es válido (coma decimal); antes daba null y se perdía.
+  const raw = value.trim().replace(",", ".");
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && !Number.isNaN(parsed) ? parsed : null;
 };
+
+type CommissionMaps = {
+  comisiones_por_categoria: Record<string, number>;
+  comisiones_por_servicio: Record<string, number>;
+};
+
+const draftToCommissionMaps = (
+  categoryCommissions: Record<string, string>,
+  serviceOverrides: Record<string, string>,
+  nombreServicio: (serviceId: string) => string,
+): CommissionMaps => {
+  const aNumero = (etiqueta: string, valor: string): number | null => {
+    const n = parseCommissionValue(valor);
+    if (n === null) {
+      if (valor.trim()) throw new Error(`La comisión de "${etiqueta}" no es un número válido.`);
+      return null;
+    }
+    if (n < 0 || n > 100) throw new Error(`La comisión de "${etiqueta}" debe estar entre 0 y 100.`);
+    return n;
+  };
+  const comisiones_por_categoria: Record<string, number> = {};
+  for (const [categoria, valor] of Object.entries(categoryCommissions)) {
+    const n = aNumero(categoria, valor);
+    if (n !== null) comisiones_por_categoria[categoria] = n;
+  }
+  const comisiones_por_servicio: Record<string, number> = {};
+  for (const [serviceId, valor] of Object.entries(serviceOverrides)) {
+    const n = aNumero(nombreServicio(serviceId), valor);
+    if (n !== null) comisiones_por_servicio[serviceId] = n;
+  }
+  return { comisiones_por_categoria, comisiones_por_servicio };
+};
+
+const commissionMapsKey = (maps: CommissionMaps): string =>
+  JSON.stringify([
+    Object.entries(maps.comisiones_por_categoria).sort(([a], [b]) => a.localeCompare(b)),
+    Object.entries(maps.comisiones_por_servicio).sort(([a], [b]) => a.localeCompare(b)),
+  ]);
 
 const formatDateRangeSelectValue = (value?: string): string => {
   const date = value ? new Date(`${value}T00:00:00`) : null;
@@ -1102,95 +1143,40 @@ export function StylistsTeamWorkspace({
     [services],
   );
 
-  const getServiceIdForCategory = useCallback(
-    (category: string): string | null => {
-      const normalized = normalizeText(category);
-      const match = services.find(
-        (service) => normalizeText(service.categoria) === normalized && service.id,
-      );
-      return match?.id ?? null;
+  // Borrador de comisiones a partir de lo guardado en el profesional. Las
+  // categorías del catálogo aparecen todas (vacías si no tienen %); las que
+  // estén guardadas con otro nombre/mayúsculas se alinean a la del catálogo.
+  const buildCommissionDraft = useCallback(
+    (stylist: Estilista | null) => {
+      const categoryCommissions: Record<string, string> = {};
+      for (const service of services) {
+        const categoria = String(service.categoria || "").trim();
+        if (categoria && !(categoria in categoryCommissions)) categoryCommissions[categoria] = "";
+      }
+      const guardadas = (stylist?.comisiones_por_categoria || {}) as Record<string, unknown>;
+      for (const [categoria, valor] of Object.entries(guardadas)) {
+        const delCatalogo = Object.keys(categoryCommissions).find(
+          (c) => normalizeText(c) === normalizeText(categoria),
+        );
+        categoryCommissions[delCatalogo ?? categoria] =
+          valor === null || valor === undefined ? "" : String(valor);
+      }
+      const serviceOverrides: Record<string, string> = {};
+      const porServicio = (stylist?.comisiones_por_servicio || {}) as Record<string, unknown>;
+      for (const [serviceId, valor] of Object.entries(porServicio)) {
+        if (valor !== null && valor !== undefined && String(valor).trim() !== "") {
+          serviceOverrides[serviceId] = String(valor);
+        }
+      }
+      return { categoryCommissions, serviceOverrides };
     },
     [services],
   );
 
-  const buildServiceIdsFromCategoryCommissions = useCallback(
-    (categoryMap: unknown): string[] => {
-      if (!categoryMap || typeof categoryMap !== "object" || Array.isArray(categoryMap)) {
-        return [];
-      }
-
-      const ids = Object.keys(categoryMap as Record<string, unknown>)
-        .map((category) => getServiceIdForCategory(category))
-        .filter((id): id is string => Boolean(id));
-
-      return Array.from(new Set(ids));
-    },
-    [getServiceIdForCategory],
+  const nombreServicio = useCallback(
+    (serviceId: string) => serviceOptionsById.get(serviceId)?.nombre || serviceId,
+    [serviceOptionsById],
   );
-
-  const categoryOptions = useMemo(() => {
-    if (!selectedStylist) return [];
-    const categoryMap = selectedStylist.comisiones_por_categoria;
-    if (!categoryMap || typeof categoryMap !== "object" || Array.isArray(categoryMap)) return [];
-
-    return Object.keys(categoryMap as Record<string, unknown>)
-      .map((category) => {
-        const serviceId = getServiceIdForCategory(category);
-        return serviceId ? { category, serviceId } : null;
-      })
-      .filter((item): item is { category: string; serviceId: string } => Boolean(item));
-  }, [getServiceIdForCategory, selectedStylist]);
-
-  const useCategoryOptions = categoryOptions.length > 0;
-
-  const resolveServiceIdsAndCommissions = useCallback(
-    (stylist: Estilista, targetSedeId: string) => {
-      const resolvedCommissions = resolveServiceCommissions(
-        stylist as unknown as Record<string, unknown>,
-        targetSedeId,
-      );
-
-      const specialtyServiceIds = Array.isArray(stylist.especialidades_detalle)
-        ? stylist.especialidades_detalle.map((detail) => detail.id).filter(Boolean)
-        : [];
-
-    const categoryServiceIds = buildServiceIdsFromCategoryCommissions(
-      stylist.comisiones_por_categoria,
-    );
-
-      const commissionServiceIds = resolvedCommissions.entries.map((entry) => entry.servicio_id);
-
-      const mergedServiceIds = Array.from(
-        new Set([...specialtyServiceIds, ...categoryServiceIds, ...commissionServiceIds]),
-      );
-
-      return {
-        serviceIds: mergedServiceIds,
-        resolvedCommissions,
-      };
-    },
-    [buildServiceIdsFromCategoryCommissions],
-  );
-
-  const selectServiceOptions = useMemo(() => {
-    if (!useCategoryOptions) {
-      return services;
-    }
-
-    // Priorizar las categorías ya configuradas, pero mostrar todos los servicios disponibles
-    const categoryServices = categoryOptions.map(({ category, serviceId }) => ({
-      id: serviceId,
-      nombre: category,
-      categoria: category,
-      duracion: 0,
-      precio: 0,
-    }));
-
-    const categoryIds = new Set(categoryServices.map((s) => s.id));
-    const remainingServices = services.filter((s) => !categoryIds.has(s.id));
-
-    return [...categoryServices, ...remainingServices];
-  }, [categoryOptions, services, useCategoryOptions]);
 
   const baseDashboardRows = useMemo(
     () =>
@@ -1323,8 +1309,7 @@ export function StylistsTeamWorkspace({
           comision: "",
           password: "",
           activo: true,
-          serviceIds: [],
-          serviceCommissions: [],
+          ...buildCommissionDraft(null),
           productCommission: "",
           serviciosNoPresta: [],
           horarioId: null,
@@ -1332,16 +1317,6 @@ export function StylistsTeamWorkspace({
         });
         return;
       }
-
-      const { serviceIds, resolvedCommissions } = resolveServiceIdsAndCommissions(
-        stylist,
-        targetSedeId,
-      );
-      const categoryCommissions = resolveCategoryCommissionEntries(
-        stylist as unknown as Record<string, unknown>,
-        services,
-        serviceIds,
-      );
 
       const matchedUser =
         systemUsers.find(
@@ -1359,14 +1334,7 @@ export function StylistsTeamWorkspace({
           stylist.comision !== null && stylist.comision !== undefined ? String(stylist.comision) : "",
         password: "",
         activo: Boolean(stylist.activo),
-        serviceIds,
-        serviceCommissions: (categoryCommissions.length > 0
-          ? categoryCommissions
-          : resolvedCommissions.entries
-        ).map((entry) => ({
-        ...entry,
-        tipo: "%",
-      })),
+        ...buildCommissionDraft(stylist),
         productCommission:
           stylist.comision_productos !== null && stylist.comision_productos !== undefined
             ? String(stylist.comision_productos)
@@ -1378,7 +1346,7 @@ export function StylistsTeamWorkspace({
       horarioInitialSnapshotRef.current = null;
       horarioLoadedForRef.current = null;
     },
-    [primarySelectedSedeId, resolveServiceIdsAndCommissions, selectedSedeId, services, systemUsers],
+    [primarySelectedSedeId, buildCommissionDraft, selectedSedeId, systemUsers],
   );
 
   // Carga perezosa del horario: solo se pide al backend cuando el admin
@@ -1856,80 +1824,19 @@ export function StylistsTeamWorkspace({
     });
   };
 
-  const getNormalizedCategoryForService = (serviceId: string): string =>
-    normalizeText(serviceOptionsById.get(serviceId)?.categoria ?? "");
-
-  const addServiceToEditor = () => {
-    if (!editorState) return;
-
-    const nextService = selectServiceOptions.find(
-      (service) => !editorState.serviceIds.includes(service.id),
-    );
-    if (!nextService) return;
-
+  const updateCategoryCommission = (categoria: string, valor: string) => {
     setEditorState((current) =>
-      current
-        ? {
-            ...current,
-            serviceIds: [...current.serviceIds, nextService.id],
-            serviceCommissions: [
-              ...current.serviceCommissions,
-              {
-                servicio_id: nextService.id,
-                valor:
-                  current.serviceCommissions.find(
-                    (entry) =>
-                      getNormalizedCategoryForService(entry.servicio_id) ===
-                      getNormalizedCategoryForService(nextService.id),
-                  )?.valor ?? 0,
-                tipo: "%" as const,
-              },
-            ],
-          }
-        : current,
+      current ? { ...current, categoryCommissions: { ...current.categoryCommissions, [categoria]: valor } } : current,
     );
   };
 
-
-  const removeServiceSelection = (serviceId: string) => {
-    setEditorState((current) =>
-      current
-        ? {
-            ...current,
-            serviceIds: current.serviceIds.filter((currentServiceId) => currentServiceId !== serviceId),
-            serviceCommissions: current.serviceCommissions.filter(
-              (entry) => entry.servicio_id !== serviceId,
-            ),
-          }
-        : current,
-    );
-  };
-
-  const updateServiceCommission = (
-    serviceId: string,
-    updates: Partial<ServiceCommissionEntry>,
-  ) => {
+  const updateServiceOverride = (serviceId: string, valor: string) => {
     setEditorState((current) => {
       if (!current) return current;
-
-      const category = getNormalizedCategoryForService(serviceId);
-      const hasEntry = current.serviceCommissions.some((entry) => entry.servicio_id === serviceId);
-      const nextEntries = hasEntry
-        ? current.serviceCommissions.map((entry) =>
-            entry.servicio_id === serviceId ||
-            (category && getNormalizedCategoryForService(entry.servicio_id) === category)
-              ? { ...entry, ...updates, tipo: "%" as const }
-              : entry,
-          )
-        : [
-            ...current.serviceCommissions,
-            { servicio_id: serviceId, valor: Number(updates.valor ?? 0), tipo: "%" as const },
-          ];
-
-      return {
-        ...current,
-        serviceCommissions: nextEntries,
-      };
+      const serviceOverrides = { ...current.serviceOverrides };
+      if (valor.trim() === "") delete serviceOverrides[serviceId];
+      else serviceOverrides[serviceId] = valor;
+      return { ...current, serviceOverrides };
     });
   };
 
@@ -1957,9 +1864,22 @@ export function StylistsTeamWorkspace({
 
       if (productCommission !== null && (productCommission < 0 || productCommission > 100)) {
         setBootError("La comisión por productos debe estar entre 0 y 100.");
+        toast.error("La comisión por productos debe estar entre 0 y 100.");
         setIsSaving(false);
         return;
       }
+      if (commission !== null && (commission < 0 || commission > 100)) {
+        setBootError("La comisión base debe estar entre 0 y 100.");
+        toast.error("La comisión base debe estar entre 0 y 100.");
+        setIsSaving(false);
+        return;
+      }
+      // Lanza si algún % no es válido (lo muestra el catch).
+      const commissionMaps = draftToCommissionMaps(
+        editorState.categoryCommissions,
+        editorState.serviceOverrides,
+        nombreServicio,
+      );
 
       if (editorState.mode === "create") {
         const payload: CreateEstilistaData = {
@@ -1978,15 +1898,16 @@ export function StylistsTeamWorkspace({
           await stylistApi.updateServicios(token, created.profesional_id, editorState.serviciosNoPresta);
         }
         if (
-          typeof stylistApi.updateServiceCommissions === "function" &&
-          (editorState.serviceIds.length > 0 || editorState.serviceCommissions.length > 0)
+          Object.keys(commissionMaps.comisiones_por_categoria).length > 0 ||
+          Object.keys(commissionMaps.comisiones_por_servicio).length > 0
         ) {
-          const categoryPayload = buildCategoryCommissionPayload(
-            services,
-            editorState.serviceIds,
-            editorState.serviceCommissions,
-          );
-          await stylistApi.updateServiceCommissions(token, created.profesional_id, categoryPayload);
+          await stylistApi.updateEstilista(token, created.profesional_id, {
+            nombre: payload.nombre,
+            email: payload.email,
+            sede_id: targetSedeId,
+            activo: payload.activo,
+            ...commissionMaps,
+          });
         }
         if (
           typeof stylistApi.createHorario === "function" &&
@@ -2007,12 +1928,6 @@ export function StylistsTeamWorkspace({
         await reloadStylists();
         setSelectedStylistId(created.profesional_id);
       } else if (selectedStylist) {
-        const { serviceIds: initialServiceIds } = resolveServiceIdsAndCommissions(
-          selectedStylist,
-          targetSedeId,
-        );
-        const nextServiceIds = editorState.serviceIds.filter(Boolean);
-
         // "No atiende" es independiente de las comisiones especiales — se
         // compara contra el `servicios_no_presta` real del profesional, no
         // contra qué servicios tienen comisión agregada.
@@ -2031,27 +1946,14 @@ export function StylistsTeamWorkspace({
           initialCommission !== commission ||
           initialProductCommission !== productCommission;
 
-        const initialCommissionEntries = resolveCategoryCommissionEntries(
-          selectedStylist as unknown as Record<string, unknown>,
-          services,
-          initialServiceIds,
-        );
-        const currentCategoryPayload = buildCategoryCommissionPayload(
-          services,
-          nextServiceIds,
-          editorState.serviceCommissions,
-        );
-        const initialCategoryPayload = buildCategoryCommissionPayload(
-          services,
-          initialServiceIds,
-          initialCommissionEntries,
-        );
+        const initialDraft = buildCommissionDraft(selectedStylist);
         const hasServiceCommissionChanges =
-          JSON.stringify(Object.entries(initialCategoryPayload).sort(([a], [b]) => a.localeCompare(b))) !==
-          JSON.stringify(Object.entries(currentCategoryPayload).sort(([a], [b]) => a.localeCompare(b)));
+          commissionMapsKey(
+            draftToCommissionMaps(initialDraft.categoryCommissions, initialDraft.serviceOverrides, nombreServicio),
+          ) !== commissionMapsKey(commissionMaps);
 
         const nuevaPassword = editorState.password.trim();
-        if (hasBasicChanges || nuevaPassword) {
+        if (hasBasicChanges || nuevaPassword || hasServiceCommissionChanges) {
           const payload: Partial<Estilista> & Record<string, unknown> = {
             nombre: editorState.nombre.trim(),
             email: editorState.email.trim(),
@@ -2060,6 +1962,9 @@ export function StylistsTeamWorkspace({
             activo: editorState.activo,
             comision: commission,
             comision_productos: productCommission,
+            // Categorías y servicios se guardan juntos: el mapa completo
+            // reemplaza al anterior (un % borrado deja de existir).
+            ...(hasServiceCommissionChanges ? commissionMaps : {}),
           };
           // Solo se manda `password` si el admin escribió una nueva — dejarlo
           // vacío no debe resetear la contraseña real del profesional (ver
@@ -2072,13 +1977,6 @@ export function StylistsTeamWorkspace({
         }
         if (hasNoPrestaChanges && typeof stylistApi.updateServicios === "function") {
           await stylistApi.updateServicios(token, selectedStylist.profesional_id, editorState.serviciosNoPresta);
-        }
-        if (hasServiceCommissionChanges && typeof stylistApi.updateServiceCommissions === "function") {
-          await stylistApi.updateServiceCommissions(
-            token,
-            selectedStylist.profesional_id,
-            currentCategoryPayload,
-          );
         }
         if (editorState.disponibilidad) {
           const disponibilidadPayload = editorState.disponibilidad.map(
@@ -2108,11 +2006,14 @@ export function StylistsTeamWorkspace({
         }
         await reloadStylists();
       }
+      toast.success("Cambios guardados");
     } catch (error) {
       console.error("Error guardando estilista:", error);
-      setBootError(
-        error instanceof Error ? error.message : "No se pudo guardar la configuración del profesional.",
-      );
+      const mensaje =
+        error instanceof Error ? error.message : "No se pudo guardar la configuración del profesional.";
+      setBootError(mensaje);
+      // El aviso de arriba de la página queda detrás del panel de edición.
+      toast.error(mensaje, { duration: 8000 });
     } finally {
       setIsSaving(false);
     }
@@ -2269,21 +2170,8 @@ export function StylistsTeamWorkspace({
     [],
   );
 
-  const getServiceCategoriesGrouped = useCallback(() => {
-    if (!editorState) return new Map<string, { serviceId: string; nombre: string; categoria: string }[]>();
-    const grouped = new Map<string, { serviceId: string; nombre: string; categoria: string }[]>();
-    for (const sId of editorState.serviceIds) {
-      const svc = serviceOptionsById.get(sId);
-      const cat = svc?.categoria || "Sin categoría";
-      if (!grouped.has(cat)) grouped.set(cat, []);
-      grouped.get(cat)!.push({ serviceId: sId, nombre: svc?.nombre || sId, categoria: cat });
-    }
-    return grouped;
-  }, [editorState, serviceOptionsById]);
-
   // Catálogo completo agrupado por categoría — para el checklist de "no
-  // atiende" (a diferencia de getServiceCategoriesGrouped, que solo agrupa
-  // los servicios que ya tienen comisión especial agregada).
+  // atiende" y para las comisiones por categoría/servicio.
   const allServicesGroupedByCategory = useMemo(() => {
     const grouped = new Map<string, { serviceId: string; nombre: string }[]>();
     for (const svc of services) {
@@ -3003,82 +2891,92 @@ export function StylistsTeamWorkspace({
                           </div>
 
                           <div className="gle-hint-box text-[12px]">
-                            Puedes sobrescribir el % para cada categoría de servicio. Las categorías sin % específico usarán la comisión base.
+                            Pon el % de cada categoría; si la dejas vacía se usa la comisión base. Abre una categoría
+                            para darle a un servicio un % propio, que gana sobre el de su categoría.
                           </div>
 
-                          {/* Grouped by category */}
-                          {(() => {
-                            const grouped = getServiceCategoriesGrouped();
-                            return Array.from(grouped.entries()).map(([cat, svcs]) => {
-                              const isOpen = settingsOpenCategories.has(cat);
-                              return (
-                                <div key={cat} className="mb-[6px]">
-                                  <div className="gle-cat-header" onClick={() => toggleSettingsCategory(cat)}>
-                                    <div className="gle-cat-header-name text-[12px]">
-                                      {cat}
-                                      <span className="gle-cat-count text-[11px]">{svcs.length} servicio{svcs.length !== 1 ? "s" : ""}</span>
-                                    </div>
+                          {Array.from(allServicesGroupedByCategory.entries()).map(([cat, svcs]) => {
+                            const clave = `comision-${cat}`;
+                            const isOpen = settingsOpenCategories.has(clave);
+                            const tieneCategoria = cat in editorState.categoryCommissions;
+                            const valorCategoria = editorState.categoryCommissions[cat] ?? "";
+                            const heredado = valorCategoria.trim() || editorState.comision.trim() || "0";
+                            const conPropio = svcs.filter(
+                              ({ serviceId }) => (editorState.serviceOverrides[serviceId] ?? "") !== "",
+                            ).length;
+                            return (
+                              <div key={clave} className="mb-[6px]">
+                                <div className="gle-cat-header" onClick={() => toggleSettingsCategory(clave)}>
+                                  <div className="gle-cat-header-name text-[12px]">
+                                    {cat}
+                                    <span className="gle-cat-count text-[11px]">
+                                      {svcs.length} servicio{svcs.length !== 1 ? "s" : ""}
+                                      {conPropio > 0 ? ` · ${conPropio} con % propio` : ""}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-[8px]">
+                                    {tieneCategoria && (
+                                      <div
+                                        className="gle-commission-input-wrap"
+                                        style={{ width: 72 }}
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <input
+                                          className="gle-commission-input text-[13px]"
+                                          type="text"
+                                          inputMode="decimal"
+                                          value={valorCategoria}
+                                          placeholder={editorState.comision.trim() || "0"}
+                                          onChange={(e) => updateCategoryCommission(cat, e.target.value)}
+                                        />
+                                        <span className="gle-commission-symbol text-[12px]">%</span>
+                                      </div>
+                                    )}
                                     <span className={`gle-cat-expand text-[12px] ${isOpen ? "open" : ""}`}>▾</span>
                                   </div>
-                                  {isOpen && (
-                                    <div>
-                                      <div className="gle-cat-divider" />
-                                      {svcs.map(({ serviceId, nombre }) => {
-                                        const entry = editorState.serviceCommissions.find(
-                                          (e) => e.servicio_id === serviceId,
-                                        ) ?? { servicio_id: serviceId, valor: 0, tipo: "%" };
-                                        return (
-                                          <div key={serviceId} className="gle-commission-row">
-                                            <div>
-                                              <div className="gle-commission-label text-[13px]">{nombre}</div>
+                                </div>
+                                {isOpen && (
+                                  <div>
+                                    <div className="gle-cat-divider" />
+                                    {svcs.map(({ serviceId, nombre }) => {
+                                      const propio = editorState.serviceOverrides[serviceId] ?? "";
+                                      return (
+                                        <div key={serviceId} className="gle-commission-row">
+                                          <div>
+                                            <div className="gle-commission-label text-[13px]">{nombre}</div>
+                                            <div className="text-[11px]" style={{ color: "var(--gle-text-tertiary)" }}>
+                                              {propio !== "" ? "% propio del servicio" : `Usa el de la categoría (${heredado}%)`}
                                             </div>
-                                            <div className="gle-commission-input-wrap">
-                                              <input
-                                                className="gle-commission-input text-[13px]"
-                                                type="number"
-                                                value={entry.valor}
-                                                onChange={(e) =>
-                                                  updateServiceCommission(serviceId, {
-                                                    valor: Number(e.target.value || 0),
-                                                  })
-                                                }
-                                              />
-                                              <span className="gle-commission-symbol text-[12px]">%</span>
-                                            </div>
-                                            <div className="gle-type-toggle">
-                                              <button type="button" className="active text-[11px]">%</button>
-                                              <button type="button" className="text-[11px]">$</button>
-                                            </div>
+                                          </div>
+                                          <div className="gle-commission-input-wrap">
+                                            <input
+                                              className="gle-commission-input text-[13px]"
+                                              type="text"
+                                              inputMode="decimal"
+                                              value={propio}
+                                              placeholder={heredado}
+                                              onChange={(e) => updateServiceOverride(serviceId, e.target.value)}
+                                            />
+                                            <span className="gle-commission-symbol text-[12px]">%</span>
+                                          </div>
+                                          {propio !== "" && (
                                             <button
                                               type="button"
                                               className="gle-del-btn"
-                                              onClick={() => removeServiceSelection(serviceId)}
+                                              title="Quitar % propio (vuelve al de la categoría)"
+                                              onClick={() => updateServiceOverride(serviceId, "")}
                                             >
                                               <Trash2 className="h-3 w-3" />
                                             </button>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            });
-                          })()}
-
-                          <button
-                            type="button"
-                            className="gle-add-line-btn text-[12px]"
-                            onClick={addServiceToEditor}
-                            disabled={
-                              selectServiceOptions.filter(
-                                (option) => !editorState.serviceIds.includes(option.id),
-                              ).length === 0
-                            }
-                          >
-                            <Plus className="h-[14px] w-[14px]" />
-                            Agregar servicio
-                          </button>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
 

@@ -546,8 +546,16 @@ async def update_professional(
             detail="No autorizado para editar profesionales"
         )
 
-    # Preparar datos a actualizar
-    update_data = {k: v for k, v in data.dict().items() if v is not None}
+    # Preparar datos a actualizar: solo lo que vino en el body. Con
+    # `data.dict()` los campos no enviados llegaban con su default ([] en
+    # servicios_no_presta / sedes_permitidas) y borraban lo guardado cada vez
+    # que se editaba el nombre o una comisión.
+    enviados = data.dict(exclude_unset=True)
+    update_data = {k: v for k, v in enviados.items() if v is not None}
+    # Las comisiones sí se pueden vaciar (null = "sin comisión propia").
+    for campo in ("comision", "comision_productos"):
+        if campo in enviados and enviados[campo] is None:
+            update_data[campo] = None
 
     # No permitir cambiar profesional_id ni rol
     update_data.pop("profesional_id", None)
