@@ -48,6 +48,10 @@ class Profesional(BaseModel):
     servicios_no_presta: Optional[List[str]] = Field(default=[])
     sedes_permitidas: Optional[List[str]] = Field(default=[])
     activo: bool = True
+    # Comisión base por servicio (%): aplica cuando el servicio no tiene %
+    # propio ni de su categoría. Antes no existía en el modelo y el valor que
+    # mandaba el formulario se descartaba en silencio.
+    comision: Optional[float] = Field(default=None, ge=0, le=100)
     comision_productos: Optional[float] = None
     comisiones_por_categoria: Optional[Dict[str, float]] = Field(
         default=None,
