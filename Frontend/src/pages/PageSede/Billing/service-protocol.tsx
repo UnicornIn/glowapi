@@ -24,6 +24,9 @@ import {
 import { registrarPagoCita } from "../Appoinment/citasApi";
 import {
   getPaquetePorId,
+  getSesionesPaquete,
+  ESTADO_COMISION_LABEL,
+  type SesionPaquete,
   registrarPagoPaquete,
   type PaqueteCliente,
 } from "../../../components/Quotes/clientsService";
@@ -278,6 +281,9 @@ export function ServiceProtocol({
   const paqueteId = lineaPaquete?.paquete_id || null;
   const [paquete, setPaquete] = useState<PaqueteCliente | null>(null);
   const [cargandoPaquete, setCargandoPaquete] = useState(false);
+  // Esta cita dentro del paquete: valor de la sesión y comisión de quien la atendió.
+  const [sesionPaquete, setSesionPaquete] = useState<SesionPaquete | null>(null);
+  const [sesionesPaquete, setSesionesPaquete] = useState<SesionPaquete[]>([]);
 
   const recargarPaquete = async () => {
     const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
@@ -287,7 +293,13 @@ export function ServiceProtocol({
     }
     setCargandoPaquete(true);
     try {
-      setPaquete(await getPaquetePorId(token, paqueteId));
+      const [datosPaquete, sesiones] = await Promise.all([
+        getPaquetePorId(token, paqueteId),
+        getSesionesPaquete(token, paqueteId).catch(() => null),
+      ]);
+      setPaquete(datosPaquete);
+      setSesionesPaquete(sesiones?.sesiones || []);
+      setSesionPaquete(sesiones?.sesiones.find((s) => s.cita_id === selectedAppointment?._id) || null);
     } finally {
       setCargandoPaquete(false);
     }
@@ -301,6 +313,45 @@ export function ServiceProtocol({
   const esCompraPaquete = !!paquete && paquete.cita_origen_id === selectedAppointment?._id;
   const esSesionPaquete = !!paquete && !esCompraPaquete;
   const paqueteFacturado = !!paquete?.facturacion;
+
+  // Acumulado del paquete por profesional: qué sesiones ha hecho cada uno,
+  // cuánto valen y cuánta comisión lleva (las agendadas van aparte, estimadas).
+  const acumuladoProfesionales = useMemo(() => {
+    const grupos = new Map<string, {
+      nombre: string;
+      realizadas: number[];
+      agendadas: number[];
+      valorRealizado: number;
+      comisionRealizada: number;
+      comisionEstimada: number;
+      porcentaje: number;
+    }>();
+    for (const s of sesionesPaquete) {
+      const c = s.comision;
+      if (!c || s.cuenta === "no_cuenta") continue;
+      const nombre = c.profesional_nombre || s.profesional_nombre || "Sin profesional";
+      const g = grupos.get(nombre) || {
+        nombre,
+        realizadas: [],
+        agendadas: [],
+        valorRealizado: 0,
+        comisionRealizada: 0,
+        comisionEstimada: 0,
+        porcentaje: c.porcentaje,
+      };
+      const numero = s.numero_sesion ?? 0;
+      if (s.cuenta === "consumida") {
+        g.realizadas.push(numero);
+        g.valorRealizado += c.valor_sesion;
+        g.comisionRealizada += c.comision;
+      } else {
+        g.agendadas.push(numero);
+        g.comisionEstimada += c.comision;
+      }
+      grupos.set(nombre, g);
+    }
+    return Array.from(grupos.values()).sort((a, b) => b.realizadas.length - a.realizadas.length);
+  }, [sesionesPaquete]);
 
   const totalGeneral = servicioTotal + productosTotal;
   const totalPagado = paquete ? paquete.abono : (selectedAppointment?.abono ?? 0);
@@ -324,7 +375,11 @@ export function ServiceProtocol({
 
   const estadoCitaLabel = getEstadoLabel(selectedAppointment?.estado || "");
   const estadoPagoLabel = getEstadoPagoLabel(selectedAppointment?.estado_pago);
-  const fichaLabel = selectedAppointment?.ficha_realizada ? "Realizada" : "Pendiente";
+  // La ficha la marca el backend (`ficha_realizada`: hay una ficha con esta
+  // cita). Una venta directa no lleva ficha.
+  const fichaLabel = (selectedAppointment as any)?.tipo_origen === "venta_directa"
+    ? "No aplica"
+    : selectedAppointment?.ficha_realizada ? "Realizada" : "Pendiente";
 
   const isPagado = paquete
     ? paquete.saldo_pendiente <= 0
@@ -779,22 +834,99 @@ export function ServiceProtocol({
               {cargandoPaquete && !paquete ? (
                 <p className="text-xs text-gray-400">Cargando paquete...</p>
               ) : paquete ? (
-                <div className="rounded-md bg-gray-50 p-3 text-[13px] space-y-1">
-                  <div className="flex justify-between">
-                    <span className="font-medium text-gray-900">{paquete.nombre_servicio}</span>
+                <div className="rounded-md bg-gray-50 p-3 text-[13px] space-y-3">
+                  <div className="flex justify-between items-baseline">
+                    <span className="font-semibold text-gray-900">{paquete.nombre_servicio}</span>
                     <span className="font-bold text-gray-900">${formatMoney(paquete.valor_total)}</span>
                   </div>
-                  <p className="text-xs text-gray-500">
-                    {esCompraPaquete
-                      ? "Esta cita es la compra del paquete."
-                      : `Esta cita es la sesión ${lineaPaquete?.numero_sesion ?? "–"} de ${paquete.sesiones_totales}.`}{" "}
-                    {paquete.sesiones_usadas} realizadas · {paquete.sesiones_agendadas ?? 0} agendadas
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    {paqueteFacturado
-                      ? `Facturado (comprobante ${paquete.facturacion?.numero_comprobante}). Las sesiones quedan cubiertas por esa factura.`
-                      : "El paquete se factura una sola vez, con lo pagado en todas sus sesiones."}
-                  </p>
+
+                  {/* Datos de esta cita */}
+                  <dl className="space-y-1 text-xs">
+                    {([
+                      [
+                        "Esta cita",
+                        esCompraPaquete
+                          ? `Compra del paquete (sesión ${sesionPaquete?.numero_sesion ?? lineaPaquete?.numero_sesion ?? 1} de ${paquete.sesiones_totales})`
+                          : `Sesión ${sesionPaquete?.numero_sesion ?? lineaPaquete?.numero_sesion ?? "–"} de ${paquete.sesiones_totales}`,
+                      ],
+                      [
+                        "Avance",
+                        `${paquete.sesiones_usadas} realizadas · ${paquete.sesiones_agendadas ?? 0} agendadas · ${
+                          paquete.sesiones_disponibles ??
+                          Math.max(paquete.sesiones_totales - paquete.sesiones_usadas - (paquete.sesiones_agendadas ?? 0), 0)
+                        } disponibles`,
+                      ],
+                      [
+                        "Valor por sesión",
+                        `$${formatMoney(paquete.valor_por_sesion)} ($${formatMoney(paquete.valor_total)} ÷ ${paquete.sesiones_totales})`,
+                      ],
+                      ...(sesionPaquete?.comision && sesionPaquete.comision.estado !== "no_cuenta"
+                        ? [
+                            ["Profesional", sesionPaquete.comision.profesional_nombre || "—"],
+                            [
+                              "Comisión de esta sesión",
+                              `$${formatMoney(sesionPaquete.comision.comision)}${
+                                sesionPaquete.comision.porcentaje ? ` (${sesionPaquete.comision.porcentaje}%)` : ""
+                              } · ${ESTADO_COMISION_LABEL[sesionPaquete.comision.estado] || sesionPaquete.comision.estado}`,
+                            ],
+                          ]
+                        : []),
+                      [
+                        "Facturación",
+                        paqueteFacturado
+                          ? `Facturado · comprobante ${paquete.facturacion?.numero_comprobante}`
+                          : "Una sola factura, con lo pagado en todas las sesiones",
+                      ],
+                    ] as [string, string][]).map(([etiqueta, valor]) => (
+                      <div key={etiqueta} className="flex justify-between gap-3">
+                        <dt className="text-gray-500 shrink-0">{etiqueta}</dt>
+                        <dd className="text-gray-900 font-medium text-right">{valor}</dd>
+                      </div>
+                    ))}
+                  </dl>
+
+                  {/* Acumulado por profesional */}
+                  {acumuladoProfesionales.length > 0 && (
+                    <div className="pt-2 border-t border-gray-200 space-y-2">
+                      <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                        Acumulado por profesional
+                      </p>
+                      {acumuladoProfesionales.map((g) => (
+                        <div key={g.nombre} className="rounded-md bg-white border border-gray-200 px-3 py-2 text-xs">
+                          <div className="flex justify-between gap-2">
+                            <span className="font-semibold text-gray-900">{g.nombre}</span>
+                            <span className="font-bold text-gray-900">${formatMoney(g.comisionRealizada)}</span>
+                          </div>
+                          <ul className="mt-1 space-y-0.5 text-gray-600">
+                            <li>
+                              • {g.realizadas.length} sesión(es) realizada(s)
+                              {g.realizadas.length > 0 && ` (n.º ${[...g.realizadas].sort((x, y) => x - y).join(", ")})`}
+                            </li>
+                            {g.realizadas.length > 0 && (
+                              <li>
+                                • {g.realizadas.length} × ${formatMoney(paquete.valor_por_sesion)} = ${formatMoney(g.valorRealizado)}
+                                {g.porcentaje ? ` × ${g.porcentaje}% = $${formatMoney(g.comisionRealizada)}` : " · sin % configurado"}
+                              </li>
+                            )}
+                            {g.agendadas.length > 0 && (
+                              <li className="text-gray-400">
+                                • {g.agendadas.length} agendada(s) (n.º {[...g.agendadas].sort((x, y) => x - y).join(", ")})
+                                {" · "}+${formatMoney(g.comisionEstimada)} estimado
+                              </li>
+                            )}
+                          </ul>
+                        </div>
+                      ))}
+                      <div className="flex justify-between text-xs px-1">
+                        <span className="text-gray-500">
+                          Total comisiones ({acumuladoProfesionales.reduce((t, g) => t + g.realizadas.length, 0)} sesiones realizadas)
+                        </span>
+                        <span className="font-bold text-gray-900">
+                          ${formatMoney(acumuladoProfesionales.reduce((t, g) => t + g.comisionRealizada, 0))}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : null}
             </div>

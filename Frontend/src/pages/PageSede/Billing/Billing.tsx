@@ -2,11 +2,12 @@
 "use client"
 
 import { useState, useEffect, useMemo } from "react"
-import { ShoppingBag, Search, FileText } from "lucide-react"
+import { ShoppingBag, Search, FileText, Package } from "lucide-react"
 import { Sidebar } from "../../../components/Layout/Sidebar"
 import { Button } from "../../../components/ui/button"
 import { Skeleton } from "../../../components/ui/skeleton"
 import { DirectSaleModal } from "./DirectSaleModal"
+import { ComisionesPaquetesModal } from "./ComisionesPaquetesModal"
 import { ServiceProtocol } from "./service-protocol"
 import { FacturaDetailModal } from "../Sales-invoiced/factura-detail-modal"
 import type { Factura } from "../../../types/factura"
@@ -227,6 +228,7 @@ export default function Billing() {
   const [selectedAppointment, setSelectedAppointment] =
     useState<Appointment | null>(null)
   const [showDirectSaleModal, setShowDirectSaleModal] = useState(false)
+  const [showComisionesPaquetes, setShowComisionesPaquetes] = useState(false)
   const [filterStatus, setFilterStatus] = useState<FilterStatus>("pendientes")
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedFactura, setSelectedFactura] = useState<Factura | null>(null)
@@ -644,6 +646,15 @@ export default function Billing() {
         onSaleCompleted={() => setMetricsRefreshKey((k) => k + 1)}
       />
 
+      <ComisionesPaquetesModal
+        isOpen={showComisionesPaquetes}
+        onClose={() => setShowComisionesPaquetes(false)}
+        desde={appliedRange.start_date}
+        hasta={appliedRange.end_date}
+        periodoLabel={periodRangeLabel}
+        sedeId={activeSedeId || undefined}
+      />
+
 
       <div className="flex flex-col h-screen bg-white">
         <Sidebar />
@@ -673,6 +684,15 @@ export default function Billing() {
                 <ShoppingBag className="h-3.5 w-3.5" />
                 Venta directa
               </button>
+              {!isRecepcionista && (
+                <button
+                  onClick={() => setShowComisionesPaquetes(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-gray-50 border border-gray-200 rounded-lg text-xs font-medium text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  <Package className="h-3.5 w-3.5" />
+                  Comisiones paquetes
+                </button>
+              )}
             </div>
           </div>
 
@@ -931,9 +951,19 @@ export default function Billing() {
 
                       {/* Ficha badge — hidden on mobile */}
                       <div className="hidden sm:flex w-16 justify-center">
-                        <span className="text-[9px] font-semibold uppercase tracking-[0.3px] px-1.5 py-0.5 rounded-sm border border-gray-200 text-gray-300">
-                          —
-                        </span>
+                        {a.tipo_origen === "venta_directa" ? (
+                          <span className="text-[9px] font-semibold uppercase tracking-[0.3px] px-1.5 py-0.5 rounded-sm border border-gray-200 text-gray-300">
+                            —
+                          </span>
+                        ) : a.ficha_realizada ? (
+                          <span className="text-[9px] font-semibold uppercase tracking-[0.3px] px-1.5 py-0.5 rounded-sm border border-teal-200 text-teal-600">
+                            Hecha
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-semibold uppercase tracking-[0.3px] px-1.5 py-0.5 rounded-sm border border-orange-200 text-orange-500">
+                            Pendiente
+                          </span>
+                        )}
                       </div>
 
                       {/* Time — hidden on mobile */}

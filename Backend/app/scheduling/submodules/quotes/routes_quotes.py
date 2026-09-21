@@ -28,6 +28,7 @@ from app.scheduling.submodules.quotes.paquetes_helpers import (
 )
 from app.commissions.comision_engine import resolver_config_comision, calcular_comision
 from app.commissions.comision_context import construir_contexto
+from app.commissions.comision_paquetes import comisiones_de_sesiones, reporte_sesiones_por_profesional
 from app.scheduling.models import Cita, ProductoItem, PagoRequest, ServicioEnCita, ServicioEnFicha
 from app.clients_service.routes_clientes import calcular_analytics_cliente
 from app.database.mongo import (
@@ -525,6 +526,14 @@ async def obtener_citas(
 
         # === Enriquecer (servicio_nombre/duración) + normalizar — lógica compartida ===
         citas = await _enriquecer_citas_con_servicios(citas)
+
+        # Ficha técnica: la ficha guarda la cita en `datos_especificos.cita_id`.
+        ids_citas = [str(c.get("_id")) for c in citas if c.get("_id")]
+        con_ficha = set(await collection_card.distinct(
+            "datos_especificos.cita_id", {"datos_especificos.cita_id": {"$in": ids_citas}}
+        ))
+        for c in citas:
+            c["ficha_realizada"] = str(c.get("_id")) in con_ficha
 
         print(f"✅ Retornando {len(citas)} citas enriquecidas")
         return {"citas": citas}
@@ -4294,6 +4303,32 @@ async def sesiones_de_paquete(paquete_id: str, current_user: dict = Depends(get_
     sesiones = [_resumen_cita_paquete(c, idx, paquete) for c, idx in ligadas]
     ids_ligadas = {s["cita_id"] for s in sesiones}
 
+    # Reparto del valor del paquete por sesión y comisión de quien la atendió
+    # (no se le muestra a un estilista lo que ganan los demás).
+    reparto = []
+    if current_user.get("rol") != "estilista":
+        facturado = bool(paquete.get("facturacion")) or any(
+            s["es_origen"] and s["estado_factura"] == "facturado" for s in sesiones
+        )
+        comisiones = await comisiones_de_sesiones(ligadas, paquete, facturado)
+        por_profesional = {}
+        for s in sesiones:
+            s["comision"] = comisiones.get(s["cita_id"])
+            if not s["comision"] or s["comision"]["estado"] == "no_cuenta":
+                continue
+            clave = s["comision"]["profesional_id"] or "sin_profesional"
+            g = por_profesional.setdefault(clave, {
+                "profesional_id": s["comision"]["profesional_id"],
+                "profesional_nombre": s["comision"]["profesional_nombre"] or "Sin profesional",
+                "sesiones": 0, "realizadas": 0, "valor_sesiones": 0.0, "comision": 0.0,
+            })
+            g["sesiones"] += 1
+            if s["cuenta"] == "consumida":
+                g["realizadas"] += 1
+            g["valor_sesiones"] = round(g["valor_sesiones"] + s["comision"]["valor_sesion"], 2)
+            g["comision"] = round(g["comision"] + s["comision"]["comision"], 2)
+        reparto = sorted(por_profesional.values(), key=lambda g: -g["sesiones"])
+
     candidatas = await collection_citas.find({
         "cliente_id": paquete.get("cliente_id"),
         "servicios": {"$elemMatch": {
@@ -4321,6 +4356,7 @@ async def sesiones_de_paquete(paquete_id: str, current_user: dict = Depends(get_
         "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
         "sesiones": sesiones,
         "sin_asociar": sin_asociar,
+        "reparto_profesionales": reparto,
     }
 
 
@@ -4613,8 +4649,32 @@ async def sincronizar_todos_los_paquetes(
         ] if not aplicar else None,
         "con_sobrecupo": [pid for pid, r in resultados.items() if r and r.get("sobrecupo")],
         "inactivos": [pid for pid, r in resultados.items() if r and r.get("activo") is False],
+        "comisiones_sesiones": [
+            {"paquete_id": pid, **c}
+            for pid, r in resultados.items() if r
+            for c in r.get("comisiones", [])
+        ],
         "resultados": {pid: _limpio(r) for pid, r in resultados.items()},
     }
+
+
+@router.get("/paquetes/comisiones-sesiones", response_model=dict)
+async def comisiones_sesiones_paquete(
+    desde: str = Query(..., description="YYYY-MM-DD"),
+    hasta: str = Query(..., description="YYYY-MM-DD"),
+    sede_id: Optional[str] = Query(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Sesiones de paquete realizadas en el rango, agrupadas por el profesional
+    que las atendió: valor de cada sesión (valor del paquete / sesiones) y su
+    comisión — registrada si el paquete ya se facturó, estimada si no.
+    """
+    if current_user.get("rol") not in ["super_admin", "admin_sede", "recepcionista", "call_center"]:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    if current_user.get("rol") != "super_admin":
+        sede_id = current_user.get("sede_id")
+    return await reporte_sesiones_por_profesional(sede_id, desde, hasta)
 
 
 @router.get("/pendientes-cierre", response_model=dict)

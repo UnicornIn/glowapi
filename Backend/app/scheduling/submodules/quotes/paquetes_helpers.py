@@ -35,6 +35,7 @@ from typing import Optional, Iterable
 from bson import ObjectId
 
 from app.database.mongo import collection_client_packages, collection_citas
+from app.commissions.comision_paquetes import liquidar_comisiones_paquete
 
 
 ESTADOS_CONSUMEN_SESION = {"finalizado", "completada"}
@@ -367,6 +368,19 @@ async def sincronizar_paquete(paquete_id: Optional[str], dry_run: bool = False) 
         **{k: v for k, v in set_paquete.items() if k not in ("historial_uso", "historial_pagos", "historial_pagos_legacy", "pagos_migrados")},
         "numeros": numeros,
     }
+
+    # Comisión de cada sesión para el profesional que la atendió (se
+    # registra cuando la sesión está realizada y el paquete facturado).
+    try:
+        ligadas_actuales = ligadas if dry_run else await citas_ligadas_paquete(paquete)
+        comisiones = await liquidar_comisiones_paquete(
+            {**paquete, **set_paquete}, ligadas_actuales, facturacion, dry_run=dry_run, numeros=numeros,
+        )
+        if comisiones:
+            resumen["comisiones"] = comisiones
+    except Exception as e:
+        print(f"⚠️ No se pudieron liquidar comisiones del paquete {paquete_id}: {e}")
+
     if dry_run:
         resumen["cambios_citas"] = cambios_citas
         resumen["cambios_paquete"] = cambios_paquete

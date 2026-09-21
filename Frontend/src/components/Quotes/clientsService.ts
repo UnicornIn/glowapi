@@ -538,6 +538,94 @@ export interface SesionPaquete {
   cuenta: "consumida" | "agendada" | "no_cuenta";
   es_origen: boolean;
   cita: any;
+  /** Reparto del paquete: valor de esta sesión y comisión de quien la atiende (no viene para estilistas) */
+  comision?: ComisionSesionPaquete | null;
+}
+
+export type EstadoComisionSesion =
+  | "registrada"
+  | "pagada"
+  | "pendiente_factura"
+  | "por_registrar"
+  | "agendada"
+  | "no_cuenta"
+  | "sin_porcentaje"
+  | "factura_sin_comision";
+
+export interface ComisionSesionPaquete {
+  valor_sesion: number;
+  porcentaje: number;
+  comision: number;
+  estado: EstadoComisionSesion;
+  profesional_id?: string | null;
+  profesional_nombre?: string | null;
+}
+
+export const ESTADO_COMISION_LABEL: Record<EstadoComisionSesion, string> = {
+  registrada: "Registrada",
+  pagada: "Pagada",
+  pendiente_factura: "Al facturar el paquete",
+  por_registrar: "Por registrar",
+  agendada: "Estimada",
+  no_cuenta: "No aplica",
+  sin_porcentaje: "Sin % configurado",
+  factura_sin_comision: "La factura no la generó",
+};
+
+export interface RepartoProfesionalPaquete {
+  profesional_id?: string | null;
+  profesional_nombre: string;
+  sesiones: number;
+  realizadas: number;
+  valor_sesiones: number;
+  comision: number;
+}
+
+export interface SesionComisionReporte extends ComisionSesionPaquete {
+  cita_id: string;
+  fecha: string;
+  hora_inicio?: string;
+  cliente_nombre?: string;
+  paquete_id: string;
+  servicio?: string;
+  numero_sesion?: number | null;
+  sesiones_totales?: number;
+  es_compra: boolean;
+}
+
+export interface ComisionesSesionesReporte {
+  desde: string;
+  hasta: string;
+  total_sesiones: number;
+  comision_total: number;
+  profesionales: {
+    profesional_id?: string | null;
+    profesional_nombre: string;
+    total_sesiones: number;
+    valor_sesiones: number;
+    comision_total: number;
+    comision_registrada: number;
+    comision_pendiente: number;
+    sesiones: SesionComisionReporte[];
+  }[];
+}
+
+export async function getComisionesSesionesPaquete(
+  token: string,
+  desde: string,
+  hasta: string,
+  sedeId?: string,
+): Promise<ComisionesSesionesReporte> {
+  const params = new URLSearchParams({ desde, hasta });
+  if (sedeId) params.set('sede_id', sedeId);
+  const res = await fetch(`${API_BASE_URL}scheduling/quotes/paquetes/comisiones-sesiones?${params}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.detail || 'No se pudieron cargar las comisiones de paquetes');
+  }
+  return res.json();
 }
 
 export interface SesionesPaqueteResponse {
@@ -552,6 +640,7 @@ export interface SesionesPaqueteResponse {
   };
   sesiones: SesionPaquete[];
   sin_asociar: SesionPaquete[];
+  reparto_profesionales?: RepartoProfesionalPaquete[];
 }
 
 const _postJson = async (url: string, token: string, body: unknown, fallback: string) => {

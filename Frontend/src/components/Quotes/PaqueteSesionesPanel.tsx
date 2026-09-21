@@ -2,14 +2,17 @@
 // SuperAdmin y de Sede). Muestra en qué sesión va la cita, permite abrir la
 // lista completa de sesiones del paquete (pasadas y futuras) para saltar a
 // cualquiera de ellas, y asociar/desasociar citas que quedaron por fuera del
-// paquete (ej. se agendaron con "precio normal").
+// paquete (ej. se agendaron con "precio normal"). También muestra el reparto
+// del valor del paquete por sesión y la comisión de quien atiende cada una.
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { Loader2, Package, X, Link2, Unlink, ChevronRight } from "lucide-react";
 import { confirmAction } from "../ui/confirm-dialog";
 import { formatDateDMY } from "../../lib/dateFormat";
+import { formatCurrencyNoDecimals } from "../../lib/currency";
 import {
+  ESTADO_COMISION_LABEL,
   getSesionesPaquete,
   asociarCitaPaquete,
   desasociarCitaPaquete,
@@ -150,6 +153,13 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
 
   const resumen = data?.resumen;
   const sesionActual = data?.sesiones.find((s) => s.cita_id === citaId);
+  const dinero = (v: number) => formatCurrencyNoDecimals(v, data?.paquete?.moneda || "COP");
+  const textoComision = (s: SesionPaquete) => {
+    const c = s.comision;
+    if (!c) return null;
+    if (c.estado === "no_cuenta") return null;
+    return `Valor sesión ${dinero(c.valor_sesion)} · Comisión ${dinero(c.comision)}${c.porcentaje ? ` (${c.porcentaje}%)` : ""} · ${ESTADO_COMISION_LABEL[c.estado] || c.estado}`;
+  };
 
   const renderFila = (s: SesionPaquete, tipo: "ligada" | "suelta") => {
     const est = ESTADO_LABEL[s.cuenta] || ESTADO_LABEL.agendada;
@@ -187,8 +197,11 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
           <div className="text-[11px] text-slate-500 truncate">
             {s.profesional_nombre || "—"} · {s.estado}
             {s.estado_factura === "facturado" && ` · Facturada ${s.numero_comprobante || ""}`}
-            {tipo === "suelta" && s.valor_total > 0 && ` · $${s.valor_total}`}
+            {tipo === "suelta" && s.valor_total > 0 && ` · ${dinero(s.valor_total)}`}
           </div>
+          {tipo === "ligada" && textoComision(s) && (
+            <div className="text-[11px] text-emerald-700 truncate">{textoComision(s)}</div>
+          )}
         </button>
         <span
           className="text-[10px] font-semibold rounded px-1.5 py-0.5 shrink-0"
@@ -251,6 +264,12 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
                       <span className="text-red-600 font-semibold"> · {resumen.sobrecupo} de más</span>
                     )}
                   </div>
+                  {sesionActual && textoComision(sesionActual) && (
+                    <div className="text-emerald-700">
+                      {sesionActual.comision?.profesional_nombre ? `${sesionActual.comision.profesional_nombre}: ` : ""}
+                      {textoComision(sesionActual)}
+                    </div>
+                  )}
                   {(data?.sin_asociar.length || 0) > 0 && (
                     <div className="text-amber-700 font-medium">
                       {data?.sin_asociar.length} cita(s) del mismo servicio sin asociar
@@ -340,6 +359,38 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
                         Hay {resumen.sobrecupo} sesión(es) más de las que tiene el paquete. Desasocia las que no correspondan.
                       </div>
                     )}
+                    {(data.reparto_profesionales?.length || 0) > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          Reparto por profesional
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          Cada sesión vale {dinero(data.paquete.valor_por_sesion || 0)} (valor del paquete entre{" "}
+                          {resumen?.sesiones_totales} sesiones). Quien atiende la sesión recibe la comisión sobre ese valor.
+                        </p>
+                        <div className="rounded-xl overflow-hidden" style={{ border: "1px solid #E2E8F0" }}>
+                          {data.reparto_profesionales!.map((r, i) => (
+                            <div
+                              key={r.profesional_id || i}
+                              className="flex items-center justify-between gap-2 px-3 py-2 text-xs"
+                              style={{ borderTop: i ? "1px solid #F1F5F9" : undefined }}
+                            >
+                              <div className="min-w-0">
+                                <div className="font-semibold text-slate-800 truncate">{r.profesional_nombre}</div>
+                                <div className="text-[11px] text-slate-500">
+                                  {r.sesiones} sesión(es) · {r.realizadas} realizada(s) · {dinero(r.valor_sesiones)}
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <div className="font-bold text-slate-900">{dinero(r.comision)}</div>
+                                <div className="text-[10px] text-slate-500">comisión</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="space-y-1.5">
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Sesiones del paquete</div>
                       {data.sesiones.length === 0 ? (
