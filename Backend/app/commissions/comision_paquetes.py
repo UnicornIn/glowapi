@@ -39,6 +39,7 @@ from app.database.mongo import (
     collection_client_packages,
 )
 from app.utils.timezone import today
+from app.scheduling.submodules.quotes.anticipos_paquete import MODO_POR_SESION, modo_facturacion
 
 
 ESTADOS_CONSUMEN_SESION = {"finalizado", "completada"}
@@ -327,6 +328,9 @@ async def comisiones_de_sesiones(
         registradas = await _registradas_por_cita([str(c["_id"]) for c, _ in pares])
 
     valor_por_sesion = round(float(paquete.get("valor_por_sesion", 0) or 0), 2)
+    # Modo "por sesión": cada sesión tiene su propia factura, así que la
+    # comisión de cada una depende de si ESA sesión ya se facturó.
+    por_sesion = modo_facturacion(paquete) == MODO_POR_SESION
     sede = await cache.sede(paquete.get("sede_id"))
     comisiona = _sede_comisiona_servicios(sede)
     origen_id = str(paquete.get("cita_origen_id") or "")
@@ -369,14 +373,17 @@ async def comisiones_de_sesiones(
             fila["estado"] = "agendada"
         elif comision <= 0:
             fila["estado"] = "sin_porcentaje"
-        elif cita_id == origen_id and paquete_facturado:
+        elif cita_id == origen_id and paquete_facturado and not por_sesion:
             # La comisión de la cita de compra la genera su factura; si no la
             # generó, no se liquida sola (evita duplicar con la facturación).
             fila["estado"] = "factura_sin_comision"
         else:
             # Realizada y sin registrar: si el paquete ya se facturó, la
             # próxima sincronización la registra.
-            fila["estado"] = "por_registrar" if paquete_facturado else "pendiente_factura"
+            facturada = (
+                cita.get("estado_factura") == "facturado" if por_sesion else paquete_facturado
+            )
+            fila["estado"] = "por_registrar" if facturada else "pendiente_factura"
         resultado[cita_id] = fila
 
     return resultado
