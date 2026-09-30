@@ -36,6 +36,13 @@ from bson import ObjectId
 
 from app.database.mongo import collection_client_packages, collection_citas
 from app.commissions.comision_paquetes import liquidar_comisiones_paquete
+from app.scheduling.submodules.quotes.anticipos_paquete import (
+    MODO_POR_SESION,
+    MODO_PAQUETE,
+    modo_facturacion,
+    estado_anticipo,
+    pagos_anticipo_para_panel,
+)
 
 
 ESTADOS_CONSUMEN_SESION = {"finalizado", "completada"}
@@ -218,7 +225,16 @@ async def pagos_consolidados_paquete(paquete: dict, ligadas: Optional[list] = No
                 "cita_facturada": cita.get("estado_factura") == "facturado",
                 "en_caja": True,
             })
-    if paquete.get("pagos_migrados"):
+    if modo_facturacion(paquete) == MODO_POR_SESION:
+        # Modo "por sesión": el dinero vive en la bolsa de anticipo, no en
+        # las citas. Cada entrada dice cuánto se llevó ya alguna factura.
+        for fila in pagos_anticipo_para_panel(paquete):
+            pagos.append({
+                **fila,
+                "en_caja": not fila.get("sin_caja", False),
+                "cita_facturada": fila["disponible"] <= 0 and bool(fila["facturas"]),
+            })
+    elif paquete.get("pagos_migrados"):
         for i, p in enumerate(paquete.get("historial_pagos") or []):
             pagos.append({**_serializar_pago(p), "origen": "paquete", "indice": i, "en_caja": False})
     pagos.sort(key=lambda p: str(p.get("fecha") or ""))
@@ -323,6 +339,7 @@ async def sincronizar_paquete(paquete_id: Optional[str], dry_run: bool = False) 
             if not dry_run:
                 await collection_citas.update_one({"_id": cita["_id"]}, {"$set": set_cita})
 
+    por_sesion = modo_facturacion(paquete) == MODO_POR_SESION
     totales = int(paquete.get("sesiones_totales", 0) or 0)
     ajuste = _ajuste_sesiones(paquete)
     restantes_reales = totales - usadas - ajuste
@@ -346,10 +363,24 @@ async def sincronizar_paquete(paquete_id: Optional[str], dry_run: bool = False) 
         "activo": activo,
         "historial_uso": nuevo_historial + ajustes,
     }
-    if not paquete.get("pagos_migrados"):
+    if por_sesion:
+        # La bolsa manda: el abonado del paquete es lo que entró como
+        # anticipo, no la suma de pagos de las sesiones (cada sesión se
+        # cubre desde la bolsa al facturarse).
+        anticipo = estado_anticipo(paquete)
+        set_paquete.update({
+            "anticipo_total": anticipo["total"],
+            "anticipo_consumido": anticipo["consumido"],
+            "anticipo_liquidado": anticipo["liquidado"],
+            "anticipo_disponible": anticipo["disponible"],
+        })
+    if not por_sesion and not paquete.get("pagos_migrados"):
         set_paquete.update(_migrar_pagos_legacy(paquete, ligadas))
     paquete_para_pagos = {**paquete, **set_paquete}
-    set_paquete["abono"] = (await pagos_consolidados_paquete(paquete_para_pagos, ligadas))["abono"]
+    set_paquete["abono"] = (
+        set_paquete["anticipo_total"] if por_sesion
+        else (await pagos_consolidados_paquete(paquete_para_pagos, ligadas))["abono"]
+    )
 
     cambios_paquete = {
         k: {"antes": _serializar_pago({"v": paquete.get(k)})["v"], "despues": _serializar_pago({"v": v})["v"]}
@@ -371,15 +402,18 @@ async def sincronizar_paquete(paquete_id: Optional[str], dry_run: bool = False) 
 
     # Comisión de cada sesión para el profesional que la atendió (se
     # registra cuando la sesión está realizada y el paquete facturado).
-    try:
-        ligadas_actuales = ligadas if dry_run else await citas_ligadas_paquete(paquete)
-        comisiones = await liquidar_comisiones_paquete(
-            {**paquete, **set_paquete}, ligadas_actuales, facturacion, dry_run=dry_run, numeros=numeros,
-        )
-        if comisiones:
-            resumen["comisiones"] = comisiones
-    except Exception as e:
-        print(f"⚠️ No se pudieron liquidar comisiones del paquete {paquete_id}: {e}")
+    # En modo "por sesión" no hace falta: cada sesión tiene su propia
+    # factura, que ya liquida su comisión.
+    if not por_sesion:
+        try:
+            ligadas_actuales = ligadas if dry_run else await citas_ligadas_paquete(paquete)
+            comisiones = await liquidar_comisiones_paquete(
+                {**paquete, **set_paquete}, ligadas_actuales, facturacion, dry_run=dry_run, numeros=numeros,
+            )
+            if comisiones:
+                resumen["comisiones"] = comisiones
+        except Exception as e:
+            print(f"⚠️ No se pudieron liquidar comisiones del paquete {paquete_id}: {e}")
 
     if dry_run:
         resumen["cambios_citas"] = cambios_citas
@@ -442,6 +476,7 @@ async def procesar_paquete_servicio(
     origen_tipo: str = "cita",
     abono_origen: float = 0,
     historial_pagos_origen: Optional[list] = None,
+    valor_paquete: Optional[float] = None,
 ) -> Optional[dict]:
     """
     Crea (compra) o liga (canje) un paquete de sesiones para esta línea.
@@ -510,7 +545,10 @@ async def procesar_paquete_servicio(
             }
 
         sesiones_totales = int(comprar_paquete_sesiones)
-        valor_por_sesion = round(subtotal / sesiones_totales, 2) if sesiones_totales else 0
+        # En modo "por sesión" la línea de la cita vale UNA sesión, así que el
+        # precio del paquete completo viene aparte (`valor_paquete`).
+        valor_paquete_total = round(float(subtotal if valor_paquete is None else valor_paquete), 2)
+        valor_por_sesion = round(valor_paquete_total / sesiones_totales, 2) if sesiones_totales else 0
         nuevo_paquete_id = f"PKG-{random.randint(10000, 99999)}"
         while await collection_client_packages.find_one({"paquete_id": nuevo_paquete_id}):
             nuevo_paquete_id = f"PKG-{random.randint(10000, 99999)}"
@@ -527,6 +565,12 @@ async def procesar_paquete_servicio(
             "sesiones_agendadas": 0,
             "ajuste_sesiones": 0,
             "valor_por_sesion": valor_por_sesion,
+            "valor_paquete": valor_paquete_total,
+            # Cada sesión se factura sola contra el anticipo (ver
+            # anticipos_paquete.py). Los paquetes viejos siguen en modo
+            # "paquete": una sola factura por todo.
+            "modo_facturacion": MODO_POR_SESION,
+            "anticipos": [],
             "moneda": moneda_sede,
             "activo": True,
             "fecha_compra": datetime.now(),
@@ -599,7 +643,14 @@ async def propagar_facturacion_a_paquete(
     No toca abono/saldo/historial_pagos de las otras citas.
     Devuelve cuántos paquetes se actualizaron.
     """
-    paquete_ids = paquete_ids_de_servicios(servicios_cita)
+    paquete_ids = set()
+    for pid in paquete_ids_de_servicios(servicios_cita):
+        paquete = await collection_client_packages.find_one({"paquete_id": pid})
+        # Modo "por sesión": cada sesión tiene su propia factura, no se
+        # hereda la de otra.
+        if paquete and modo_facturacion(paquete) == MODO_POR_SESION:
+            continue
+        paquete_ids.add(pid)
     for pid in paquete_ids:
         await collection_client_packages.update_one(
             {"paquete_id": pid, "facturacion": {"$exists": False}},
@@ -635,6 +686,17 @@ async def contexto_facturacion_paquete(cita: dict) -> Optional[dict]:
         paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
         if not paquete:
             continue
+
+        if modo_facturacion(paquete) == MODO_POR_SESION:
+            # Cada sesión se factura sola por su valor, pagada con el
+            # anticipo del paquete (ver anticipos_paquete.py).
+            return {
+                "rol": "sesion_independiente",
+                "paquete_id": paquete_id,
+                "indice_linea": idx,
+                "paquete": paquete,
+                "valor_por_sesion": round(float(paquete.get("valor_por_sesion", 0) or 0), 2),
+            }
 
         origen_id = str(paquete.get("cita_origen_id") or "")
         if cita_id != origen_id:
