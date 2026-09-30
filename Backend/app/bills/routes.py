@@ -37,8 +37,10 @@ from app.commissions.comision_engine import (
 from app.commissions.comision_context import construir_contexto, recalcular_comisiones_periodo
 from app.commissions.comision_paquetes import porcentaje_comision_servicio, registrar_comision_servicios
 from app.scheduling.submodules.quotes.anticipos_paquete import (
+    MODO_POR_SESION,
     consumir_anticipo,
     devolver_anticipo,
+    modo_facturacion,
 )
 from app.scheduling.submodules.quotes.paquetes_helpers import (
     procesar_paquete_servicio,
@@ -624,8 +626,17 @@ async def facturar_cita_o_venta(
                 if paquete_redimido_doc:
                     base_comision = round(float(paquete_redimido_doc.get("valor_por_sesion", 0)) * cantidad, 2)
             elif comprar_paquete_sesiones:
-                valor_por_sesion_nuevo = round(subtotal / comprar_paquete_sesiones, 2) if comprar_paquete_sesiones else 0
-                base_comision = valor_por_sesion_nuevo
+                # Modo "por sesión": esta línea YA cobra una sola sesión, así
+                # que la base de comisión es su propio subtotal (dividirla de
+                # nuevo dejaría la comisión en una fracción de lo que toca).
+                paquete_compra = await collection_client_packages.find_one(
+                    {"cita_origen_id": id, "servicio_id": servicio_id}
+                )
+                if paquete_compra and modo_facturacion(paquete_compra) == MODO_POR_SESION:
+                    base_comision = subtotal
+                else:
+                    valor_por_sesion_nuevo = round(subtotal / comprar_paquete_sesiones, 2) if comprar_paquete_sesiones else 0
+                    base_comision = valor_por_sesion_nuevo
 
             comision_servicio = 0
             comision_porcentaje = 0     # ⭐ FIX: inicializar — evita UnboundLocalError

@@ -744,4 +744,18 @@ async def contexto_facturacion_paquete(cita: dict) -> Optional[dict]:
             "ya_facturado": ya_facturado,
             "pagos_sin_cita": len(paquete.get("historial_pagos") or []) if paquete.get("pagos_migrados") else 0,
         }
+
+    # La cita que compró el paquete puede haber perdido el `paquete_id` de su
+    # línea (datos viejos): se reconoce por el paquete que originó.
+    paquete = await collection_client_packages.find_one({"cita_origen_id": cita_id})
+    if paquete and modo_facturacion(paquete) == MODO_POR_SESION:
+        idx = _linea_del_paquete(cita, paquete)
+        if idx is not None:
+            return {
+                "rol": "sesion_independiente",
+                "paquete_id": paquete["paquete_id"],
+                "indice_linea": idx,
+                "paquete": paquete,
+                "valor_por_sesion": round(float(paquete.get("valor_por_sesion", 0) or 0), 2),
+            }
     return None

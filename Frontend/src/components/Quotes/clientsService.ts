@@ -658,7 +658,7 @@ export interface ComisionSesionPaquete {
 export const ESTADO_COMISION_LABEL: Record<EstadoComisionSesion, string> = {
   registrada: "Registrada",
   pagada: "Pagada",
-  pendiente_factura: "Al facturar el paquete",
+  pendiente_factura: "Al facturar",
   por_registrar: "Por registrar",
   agendada: "Estimada",
   no_cuenta: "No aplica",
