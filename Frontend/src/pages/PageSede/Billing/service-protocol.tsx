@@ -22,9 +22,14 @@ import {
   getPaymentMethodLabel,
 } from "../../../lib/payment-methods";
 import { registrarPagoCita } from "../Appoinment/citasApi";
+import { Ayuda } from "../../../components/ui/ayuda";
+import MigrarPaquetePorSesion from "../../../components/Quotes/MigrarPaquetePorSesion";
 import {
   getPaquetePorId,
   getSesionesPaquete,
+  registrarAnticipoPaquete,
+  liquidarAnticipoPaquete,
+  type AnticipoPaquete,
   ESTADO_COMISION_LABEL,
   type SesionPaquete,
   registrarPagoPaquete,
@@ -284,6 +289,13 @@ export function ServiceProtocol({
   // Esta cita dentro del paquete: valor de la sesión y comisión de quien la atendió.
   const [sesionPaquete, setSesionPaquete] = useState<SesionPaquete | null>(null);
   const [sesionesPaquete, setSesionesPaquete] = useState<SesionPaquete[]>([]);
+  // Modo "por sesión": el paquete es una bolsa de anticipo y cada sesión se
+  // factura sola contra ella.
+  const [anticipo, setAnticipo] = useState<AnticipoPaquete | null>(null);
+  const [liquidando, setLiquidando] = useState(false);
+  const puedeGestionarPaquete = ["super_admin", "admin_sede"].includes(
+    String((user as any)?.rol || user?.role || ""),
+  );
 
   const recargarPaquete = async () => {
     const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
@@ -299,6 +311,7 @@ export function ServiceProtocol({
       ]);
       setPaquete(datosPaquete);
       setSesionesPaquete(sesiones?.sesiones || []);
+      setAnticipo(sesiones?.paquete?.anticipo ?? null);
       setSesionPaquete(sesiones?.sesiones.find((s) => s.cita_id === selectedAppointment?._id) || null);
     } finally {
       setCargandoPaquete(false);
@@ -354,7 +367,7 @@ export function ServiceProtocol({
   }, [sesionesPaquete]);
 
   const totalGeneral = servicioTotal + productosTotal;
-  const totalPagado = paquete ? paquete.abono : (selectedAppointment?.abono ?? 0);
+  const totalPagado = anticipo ? anticipo.total : paquete ? paquete.abono : (selectedAppointment?.abono ?? 0);
   const saldoPendiente = paquete
     ? paquete.saldo_pendiente
     : (selectedAppointment?.saldo_pendiente ?? (totalGeneral - totalPagado));
@@ -449,6 +462,32 @@ export function ServiceProtocol({
     }
   };
 
+  const handleLiquidarAnticipo = async (tipo: "saldo_a_favor" | "devolucion") => {
+    const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+    if (!token || !paquete || !anticipo) return;
+    const confirmado = await confirmAction({
+      title: tipo === "saldo_a_favor" ? "Pasar a saldo a favor" : "Devolver el anticipo",
+      message:
+        tipo === "saldo_a_favor"
+          ? `Los $${formatMoney(anticipo.disponible)} que quedan del anticipo pasan a saldo a favor del cliente, para usarlos en otro servicio.`
+          : `Se devuelven $${formatMoney(anticipo.disponible)} al cliente y queda el egreso registrado en caja de hoy.`,
+      confirmLabel: tipo === "saldo_a_favor" ? "Sí, pasar a saldo a favor" : "Sí, devolver",
+      variant: tipo === "saldo_a_favor" ? "primary" : "danger",
+    });
+    if (!confirmado) return;
+    setLiquidando(true);
+    try {
+      const res = await liquidarAnticipoPaquete(token, paquete.paquete_id, { tipo });
+      setAnticipo(res.anticipo);
+      await recargarPaquete();
+      toast.success(res.mensaje);
+    } catch (error: any) {
+      toast.error(error?.message || "No se pudo liquidar el anticipo");
+    } finally {
+      setLiquidando(false);
+    }
+  };
+
   const handleRegistrarPago = async () => {
     if (!selectedAppointment?._id) return;
 
@@ -484,6 +523,20 @@ export function ServiceProtocol({
 
     setRegistrandoPago(true);
     try {
+      if (paquete && anticipo) {
+        // Modo "por sesión": el pago entra a la bolsa del paquete. Caja lo
+        // cuenta hoy y cada sesión se cubre desde ahí al facturarse.
+        const res = await registrarAnticipoPaquete(token, paquete.paquete_id, {
+          monto,
+          metodo,
+          cita_id: selectedAppointment._id,
+        });
+        setAnticipo(res.anticipo);
+        await recargarPaquete();
+        setPaymentAmount("");
+        toast.success("Anticipo registrado al paquete");
+        return;
+      }
       if (paquete) {
         // Queda guardado en esta sesión (caja lo ve hoy) y abona al paquete.
         const actualizado = await registrarPagoPaquete(token, paquete.paquete_id, {
@@ -521,8 +574,12 @@ export function ServiceProtocol({
 
   const handleFacturarCita = async () => {
     if (!selectedAppointment?._id) return;
-    // Desde una sesión se factura la cita que compró el paquete.
-    const idAFacturar = esSesionPaquete && paquete?.cita_origen_id ? paquete.cita_origen_id : selectedAppointment._id;
+    // Modo "por sesión": cada sesión se factura sola. Modo viejo: desde una
+    // sesión se factura la cita que compró el paquete (una sola factura).
+    const idAFacturar =
+      !anticipo && esSesionPaquete && paquete?.cita_origen_id
+        ? paquete.cita_origen_id
+        : selectedAppointment._id;
 
     try {
       setIsFacturando(true);
@@ -535,12 +592,24 @@ export function ServiceProtocol({
         return;
       }
 
-      const currentSaldo = paquete
-        ? paquete.saldo_pendiente
-        : selectedAppointment.saldo_pendiente ??
-          (selectedAppointment.valor_total || 0) - (selectedAppointment.abono || 0);
+      // Modo "por sesión": basta con que esta sesión quede cubierta (lo
+      // pagado en la cita + el anticipo disponible). No hace falta que el
+      // paquete completo esté pagado.
+      const currentSaldo = anticipo
+        ? Math.max(
+            totalGeneral - ((selectedAppointment.abono || 0) + anticipo.disponible),
+            0,
+          )
+        : paquete
+          ? paquete.saldo_pendiente
+          : selectedAppointment.saldo_pendiente ??
+            (selectedAppointment.valor_total || 0) - (selectedAppointment.abono || 0);
       if (currentSaldo > 0) {
-        toast.warning(`Saldo pendiente: $${formatMoney(currentSaldo)}`);
+        toast.warning(
+          anticipo
+            ? `El anticipo no alcanza para esta sesión: faltan $${formatMoney(currentSaldo)}. Registra el pago.`
+            : `Saldo pendiente: $${formatMoney(currentSaldo)}`,
+        );
         return;
       }
 
@@ -871,19 +940,98 @@ export function ServiceProtocol({
                             ],
                           ]
                         : []),
+                      ...(anticipo
+                        ? [
+                            [
+                              "Anticipo abonado",
+                              `$${formatMoney(anticipo.total)} de $${formatMoney(paquete.valor_paquete || paquete.valor_total)}`,
+                              "Todo lo que el cliente ha pagado del paquete. Entra a caja el día que lo paga.",
+                            ],
+                            [
+                              "Usado en facturas",
+                              `$${formatMoney(anticipo.consumido)}`,
+                              "La parte del anticipo que ya se llevaron las facturas de las sesiones prestadas.",
+                            ],
+                            ...(anticipo.liquidado > 0
+                              ? ([[
+                                  "Liquidado",
+                                  `$${formatMoney(anticipo.liquidado)}`,
+                                  "Anticipo que se cerró: pasó a saldo a favor del cliente o se le devolvió.",
+                                ]] as [string, string, string][])
+                              : []),
+                            [
+                              "Anticipo disponible",
+                              `$${formatMoney(anticipo.disponible)}`,
+                              "Lo que queda para cubrir las próximas sesiones. Si llega a cero, hay que registrar un pago para poder facturar.",
+                            ],
+                          ]
+                        : []),
                       [
                         "Facturación",
-                        paqueteFacturado
-                          ? `Facturado · comprobante ${paquete.facturacion?.numero_comprobante}`
-                          : "Una sola factura, con lo pagado en todas las sesiones",
+                        anticipo
+                          ? (selectedAppointment?.estado_factura === "facturado"
+                              ? `Facturada · comprobante ${(selectedAppointment as any)?.numero_comprobante || ""}`
+                              : anticipo.disponible >= (paquete.valor_por_sesion || 0)
+                                ? "Cada sesión se factura sola; esta queda cubierta por el anticipo"
+                                : "Cada sesión se factura sola; el anticipo no alcanza, registra el pago")
+                          : paqueteFacturado
+                            ? `Facturado · comprobante ${paquete.facturacion?.numero_comprobante}`
+                            : "Una sola factura, con lo pagado en todas las sesiones",
                       ],
-                    ] as [string, string][]).map(([etiqueta, valor]) => (
+                    ] as [string, string, string?][]).map(([etiqueta, valor, ayuda]) => (
                       <div key={etiqueta} className="flex justify-between gap-3">
-                        <dt className="text-gray-500 shrink-0">{etiqueta}</dt>
+                        <dt className="text-gray-500 shrink-0">
+                          {etiqueta}
+                          {ayuda && <Ayuda className="ml-1" texto={ayuda} />}
+                        </dt>
                         <dd className="text-gray-900 font-medium text-right">{valor}</dd>
                       </div>
                     ))}
                   </dl>
+
+                  {!anticipo && !paqueteFacturado && puedeGestionarPaquete && (
+                    <MigrarPaquetePorSesion
+                      token={
+                        user?.access_token ||
+                        localStorage.getItem("access_token") ||
+                        sessionStorage.getItem("access_token") ||
+                        ""
+                      }
+                      paqueteId={paquete.paquete_id}
+                      moneda={paquete.moneda}
+                      onMigrado={() => void recargarPaquete()}
+                    />
+                  )}
+
+                  {anticipo && anticipo.disponible > 0 && puedeGestionarPaquete && (
+                    <div className="pt-2 border-t border-gray-200">
+                      <p className="text-xs text-gray-500 mb-2">
+                        Si el cliente no vuelve, el anticipo que queda se puede cerrar:
+                        <Ayuda
+                          className="ml-1"
+                          texto="Lo que sobra no se factura, porque esas sesiones no se prestaron. Se le deja como saldo a favor para otro servicio, o se le devuelve y queda el egreso registrado en caja."
+                        />
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={liquidando}
+                          onClick={() => handleLiquidarAnticipo("saldo_a_favor")}
+                          className="text-xs font-semibold px-2.5 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                        >
+                          Pasar a saldo a favor
+                        </button>
+                        <button
+                          type="button"
+                          disabled={liquidando}
+                          onClick={() => handleLiquidarAnticipo("devolucion")}
+                          className="text-xs font-semibold px-2.5 py-1.5 rounded-md border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        >
+                          Devolver al cliente
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Acumulado por profesional */}
                   {acumuladoProfesionales.length > 0 && (

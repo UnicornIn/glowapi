@@ -24,6 +24,7 @@ import {
   Search,
 } from "lucide-react";
 import Modal from "../../../components/ui/modal";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../../components/Auth/AuthContext";
 import { updateQuote, registrarPagoCita, confirmarCita, reenviarCorreoCita, cancelarCita, eliminarCita, finalizarCita, corregirPago, eliminarPagoCita, ApiRequestError } from "./citasApi";
 import { formatDateDMY } from "../../../lib/dateFormat";
@@ -1429,6 +1430,25 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
   // visual del frontend calculada por horario (ver resolveRFStatus).
   const puedeFinalizarse =
     (appointmentDetails?.estado || "").toLowerCase() === "confirmada";
+
+  // Facturar desde la agenda: abre Facturación en el día de la cita y con
+  // el detalle de esa cita ya desplegado, listo para cobrar.
+  const navigate = useNavigate();
+  const puedeFacturarse =
+    ["finalizado", "completada"].includes(String(appointmentDetails?.estado || "").toLowerCase()) &&
+    appointmentDetails?.estado_factura !== "facturado" &&
+    appointmentDetails?.rawData?.estado_factura !== "facturado";
+
+  const irAFacturar = () => {
+    if (!appointmentDetails?.id) return;
+    // La fecha real de la cita vive en rawData (el objeto de la agenda solo
+    // trae la hora); se manda para que Facturación abra ese día.
+    const fecha = String(
+      appointmentDetails.rawData?.fecha || appointmentDetails.fecha || "",
+    ).slice(0, 10);
+    navigate(`/superadmin/billing?cita=${appointmentDetails.id}${fecha ? `&fecha=${fecha}` : ""}`);
+    onClose();
+  };
 
   const handleFinalizarCita = async () => {
     if (!appointmentDetails?.id || !user?.access_token) return;
@@ -4453,6 +4473,20 @@ const AppointmentDetailsModal: React.FC<AppointmentDetailsModalProps> = ({
                       }}
                     >
                       Cerrar
+                    </button>
+                  )}
+
+                  {puedeFacturarse && (
+                    <button
+                      onClick={irAFacturar}
+                      className="flex-1 flex items-center justify-center gap-1.5 py-3 rounded-xl text-sm font-semibold"
+                      style={{
+                        border: "1px solid #CBD5E1",
+                        color: "#1E293B",
+                        background: "#F8FAFC",
+                      }}
+                    >
+                      <CardIcon className="w-4 h-4" /> Facturar
                     </button>
                   )}
 

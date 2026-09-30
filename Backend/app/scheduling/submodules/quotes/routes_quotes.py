@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File, Form
 from datetime import datetime, time, timedelta
 import traceback
+import random
 from typing import Optional, List
 from email.message import EmailMessage
 from email.utils import formataddr
@@ -15,6 +16,7 @@ load_dotenv()
 
 from app.scheduling.submodules.fichas.controllers import generar_y_enviar_pdf_ficha
 from app.scheduling.submodules.quotes.paquetes_helpers import (
+    _facturacion_del_paquete,
     procesar_paquete_servicio,
     revertir_compra_paquete,
     sincronizar_paquete,
@@ -29,9 +31,19 @@ from app.scheduling.submodules.quotes.paquetes_helpers import (
 from app.commissions.comision_engine import resolver_config_comision, calcular_comision
 from app.commissions.comision_context import construir_contexto
 from app.commissions.comision_paquetes import comisiones_de_sesiones, reporte_sesiones_por_profesional
+from app.scheduling.submodules.quotes.anticipos_paquete import (
+    MODO_POR_SESION,
+    modo_facturacion,
+    estado_anticipo,
+    mover_pagos_cita_a_anticipo,
+    registrar_anticipo,
+    liquidar_anticipo,
+    pagos_anticipo_para_panel,
+)
 from app.scheduling.models import Cita, ProductoItem, PagoRequest, ServicioEnCita, ServicioEnFicha
 from app.clients_service.routes_clientes import calcular_analytics_cliente
 from app.database.mongo import (
+    collection_cash_expenses,
     collection_citas,
     collection_horarios,
     collection_servicios,
@@ -674,8 +686,13 @@ async def crear_cita(
         # ⭐ DETERMINAR PRECIO
         es_personalizado = False
         if paquete_id_redimido:
-            # Ya pagado al comprar el paquete — esta sesión no se vuelve a cobrar.
-            precio = 0.0
+            # Modo "por sesión": la sesión vale lo que vale una sesión del
+            # paquete y se factura sola contra el anticipo. Modo viejo: ya
+            # quedó pagada dentro de la factura única del paquete.
+            precio = (
+                round(float(paquete_doc.get("valor_por_sesion", 0) or 0), 2)
+                if modo_facturacion(paquete_doc) == MODO_POR_SESION else 0.0
+            )
             es_personalizado = False
         elif paquete_a_comprar:
             # Se cobra el paquete completo de una vez (no el precio por sesión).
@@ -683,11 +700,15 @@ async def crear_cita(
             # descuento puntual para ese cliente) — si no se manda uno válido,
             # se usa el precio de la opción de paquete configurada.
             if servicio_item.precio_personalizado is not None and servicio_item.precio_personalizado > 0:
-                precio = float(servicio_item.precio_personalizado)
+                precio_paquete_completo = float(servicio_item.precio_personalizado)
                 es_personalizado = True
             else:
-                precio = float(paquete_a_comprar["precio"])
+                precio_paquete_completo = float(paquete_a_comprar["precio"])
                 es_personalizado = False
+            # El paquete no se cobra de una: esta cita es la sesión 1 y vale
+            # una sesión. Lo que el cliente abone va a la bolsa del paquete
+            # y cubre las siguientes sesiones a medida que se facturan.
+            precio = round(precio_paquete_completo / int(servicio_item.comprar_paquete_sesiones), 2)
         elif servicio_item.precio_personalizado is not None and servicio_item.precio_personalizado > 0:
             # Precio personalizado válido
             precio = float(servicio_item.precio_personalizado)
@@ -723,7 +744,8 @@ async def crear_cita(
             "cantidad": cantidad,
             "subtotal": subtotal,
             **({"paquete_id": paquete_id_redimido} if paquete_id_redimido else {}),
-            **({"comprar_paquete_sesiones": servicio_item.comprar_paquete_sesiones} if paquete_a_comprar else {}),
+            **({"comprar_paquete_sesiones": servicio_item.comprar_paquete_sesiones,
+                "valor_paquete": round(precio_paquete_completo, 2)} if paquete_a_comprar else {}),
         }
         servicios_procesados.append(servicio_guardado)
 
@@ -887,10 +909,17 @@ async def crear_cita(
             profesional_id=cita.profesional_id,
             usuario_email=current_user.get("email"),
             subtotal=linea.get("subtotal", 0),
+            valor_paquete=linea.get("valor_paquete"),
         )
         if resultado_compra and resultado_compra.get("ok"):
             linea["paquete_id"] = resultado_compra.get("paquete_id")
             servicios_con_paquete_nuevo = True
+            # Lo que el cliente paga al comprar es el anticipo del paquete:
+            # pasa a la bolsa y desde ahí se cubre cada sesión al facturarla.
+            await mover_pagos_cita_a_anticipo(
+                {"_id": result.inserted_id, "historial_pagos": historial_pagos, "valor_total": valor_total},
+                resultado_compra["paquete_id"],
+            )
     if servicios_con_paquete_nuevo:
         await collection_citas.update_one({"_id": result.inserted_id}, {"$set": {"servicios": servicios_procesados}})
 
@@ -1822,11 +1851,33 @@ async def editar_cita(
                     precio = precio_personalizado_float
 
             precio_referencia = float(tier_compra["precio"]) if tier_compra else precio_base_sede
+            paquete_linea_doc = (
+                await collection_client_packages.find_one({"paquete_id": paquete_id_final})
+                if paquete_id_final else None
+            )
+            linea_por_sesion = (
+                modo_facturacion(paquete_linea_doc) == MODO_POR_SESION if paquete_linea_doc
+                else bool(comprar_final)  # paquete nuevo: nace en modo por sesión
+            )
             if paquete_id_final and not es_cita_compradora:
-                # Sesión cubierta por el paquete: no se cobra de nuevo. Antes
-                # un precio 0 caía al precio base y la sesión se cobraba.
-                precio = 0.0
-                precio_referencia = 0.0
+                # Modo "por sesión": vale una sesión y se factura sola contra
+                # el anticipo. Modo viejo: la cubre la factura del paquete.
+                # (Antes un precio 0 caía al precio base y se cobraba doble.)
+                precio = (
+                    round(float((paquete_linea_doc or {}).get("valor_por_sesion", 0) or 0), 2)
+                    if linea_por_sesion else 0.0
+                )
+                precio_referencia = precio
+            elif es_cita_compradora and linea_por_sesion:
+                # La compra cobra la sesión 1; el paquete completo queda como
+                # anticipo por cobrar.
+                valor_paquete_linea = round(float(precio if precio is not None else precio_referencia), 2)
+                if paquete_linea_doc:
+                    precio = round(float(paquete_linea_doc.get("valor_por_sesion", 0) or 0), 2)
+                    valor_paquete_linea = round(float(paquete_linea_doc.get("valor_paquete", 0) or 0), 2) or valor_paquete_linea
+                else:
+                    precio = round(valor_paquete_linea / int(comprar_final), 2)
+                precio_referencia = precio
             elif precio is None:
                 precio = precio_referencia
 
@@ -1861,6 +1912,7 @@ async def editar_cita(
                         usuario_email=current_user.get("email"), subtotal=subtotal,
                         abono_origen=cita_actual.get("abono", 0),
                         historial_pagos_origen=cita_actual.get("historial_pagos"),
+                        valor_paquete=valor_paquete_linea if es_cita_compradora and linea_por_sesion else None,
                     )
                     if resultado and not resultado.get("ok"):
                         raise HTTPException(
@@ -4349,15 +4401,383 @@ async def sesiones_de_paquete(paquete_id: str, current_user: dict = Depends(get_
         sin_asociar.append(_resumen_cita_paquete(c, idx, paquete))
     sin_asociar.sort(key=lambda s: (str(s.get("fecha") or ""), str(s.get("hora_inicio") or "")))
 
+    anticipo = estado_anticipo(paquete) if modo_facturacion(paquete) == MODO_POR_SESION else None
+    anticipos_detalle = pagos_anticipo_para_panel(paquete) if anticipo else []
     paquete["_id"] = str(paquete["_id"])
     paquete.pop("historial_uso", None)
+    paquete.pop("anticipos", None)
     return {
-        "paquete": _enriquecer_paquete_con_pago(paquete),
+        "paquete": {
+            **_enriquecer_paquete_con_pago(paquete),
+            "modo_facturacion": modo_facturacion(paquete),
+            "anticipo": anticipo,
+            "anticipos": anticipos_detalle,
+        },
         "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
         "sesiones": sesiones,
         "sin_asociar": sin_asociar,
         "reparto_profesionales": reparto,
     }
+
+
+
+
+# =============================================================
+# 🔹 ANTICIPO DEL PAQUETE (facturación sesión por sesión)
+# =============================================================
+# El cliente abona por adelantado y cada sesión se factura sola contra ese
+# anticipo. El abono entra acá (no en una cita): caja lo cuenta el día que
+# entró, y cada factura de sesión se lleva su pedazo.
+
+class AnticipoPaqueteRequest(BaseModel):
+    monto: float = Field(..., gt=0)
+    metodo: str = Field(..., min_length=2)
+    notas: Optional[str] = None
+    cita_id: Optional[str] = Field(default=None, description="Sesión en la que se recibió el abono (informativo)")
+
+
+class LiquidarAnticipoRequest(BaseModel):
+    tipo: str = Field(..., description="saldo_a_favor | devolucion")
+    motivo: Optional[str] = None
+    monto: Optional[float] = Field(default=None, gt=0, description="Por defecto, todo lo disponible")
+
+
+@router.post("/paquetes/{paquete_id}/anticipos", response_model=dict)
+async def registrar_anticipo_paquete(
+    paquete_id: str,
+    data: AnticipoPaqueteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Abono del cliente al paquete. Cubre las sesiones a medida que se facturan."""
+    if current_user.get("rol") not in ["admin_sede", "super_admin", "recepcionista", "call_center"]:
+        raise HTTPException(status_code=403, detail="No autorizado para registrar pagos")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if current_user.get("rol") == "admin_sede" and paquete.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar paquetes de tu propia sede")
+    if modo_facturacion(paquete) != MODO_POR_SESION:
+        raise HTTPException(
+            status_code=400,
+            detail="Este paquete es de los que se facturan completos: el pago se registra en la cita, no como anticipo.",
+        )
+    if not paquete.get("activo", True):
+        raise HTTPException(status_code=400, detail="El paquete está inactivo (la cita que lo compró se canceló)")
+
+    metodo = data.metodo.lower().strip()
+    if metodo in ("giftcard", "saldo_a_favor"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{metodo}' mueve saldo en otra parte: regístralo en la sesión, no como anticipo del paquete.",
+        )
+
+    monto = round(float(data.monto), 2)
+    estado = estado_anticipo(paquete)
+    valor_paquete = round(float(paquete.get("valor_paquete") or 0), 2)
+    if valor_paquete and round(estado["total"] + monto, 2) > valor_paquete:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El abono excede el valor del paquete: van {estado['total']} de {valor_paquete}.",
+        )
+
+    await registrar_anticipo(
+        paquete_id,
+        monto=monto,
+        metodo=metodo,
+        registrado_por=current_user.get("email"),
+        notas=data.notas,
+        cita_id=data.cita_id,
+    )
+    resumen = await sincronizar_paquete(paquete_id) or {}
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    return {
+        "success": True,
+        "mensaje": f"Anticipo de {monto} registrado",
+        "anticipo": estado_anticipo(paquete),
+        "resumen": {k: v for k, v in resumen.items() if k != "numeros"},
+    }
+
+
+@router.post("/paquetes/{paquete_id}/anticipo/liquidar", response_model=dict)
+async def liquidar_anticipo_paquete(
+    paquete_id: str,
+    data: LiquidarAnticipoRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Cierra el anticipo que sobró porque el cliente no volvió:
+    - "saldo_a_favor": queda como crédito del cliente para otro servicio.
+    - "devolucion": se le devuelve la plata y queda un egreso en caja.
+
+    Ninguna de las dos toca lo que caja ya contó el día del abono: esa plata
+    entró de verdad; la devolución sale como egreso del día de hoy.
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede liquidar el anticipo")
+    if data.tipo not in ("saldo_a_favor", "devolucion"):
+        raise HTTPException(status_code=400, detail="tipo debe ser 'saldo_a_favor' o 'devolucion'")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if current_user.get("rol") == "admin_sede" and paquete.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar paquetes de tu propia sede")
+    if modo_facturacion(paquete) != MODO_POR_SESION:
+        raise HTTPException(status_code=400, detail="Este paquete no maneja anticipo")
+
+    disponible = estado_anticipo(paquete)["disponible"]
+    if disponible <= 0:
+        raise HTTPException(status_code=400, detail="El paquete no tiene anticipo disponible para liquidar")
+    monto = round(float(data.monto), 2) if data.monto else disponible
+    if monto > disponible:
+        raise HTTPException(status_code=400, detail=f"Solo hay {disponible} de anticipo disponible")
+
+    resultado = await liquidar_anticipo(
+        paquete, tipo=data.tipo, usuario_email=current_user.get("email"),
+        motivo=data.motivo, monto=monto,
+    )
+
+    saldo_nuevo = None
+    egreso_id = None
+    if data.tipo == "saldo_a_favor":
+        from app.clients_service.credito import acreditar_saldo
+        saldo_nuevo = await acreditar_saldo(
+            paquete.get("cliente_id"), resultado["liquidado"],
+            tipo="anticipo_paquete", registrado_por=current_user.get("email"),
+            notas=f"Anticipo no usado del paquete {paquete_id}" + (f" — {data.motivo}" if data.motivo else ""),
+        )
+    else:
+        sede = await collection_locales.find_one({"sede_id": paquete.get("sede_id")}) or {}
+        # Un egreso por cada método con el que había abonado, para que la
+        # devolución salga de donde entró la plata.
+        egresos = {}
+        for pedazo in resultado["detalle"]:
+            metodo = (pedazo.get("metodo") or "efectivo").lower()
+            egresos[metodo] = round(egresos.get(metodo, 0) + float(pedazo.get("monto", 0) or 0), 2)
+        for metodo, monto_metodo in egresos.items():
+            doc = {
+                "egreso_id": f"EG-{random.randint(100000, 999999)}",
+                "sede_id": paquete.get("sede_id"),
+                "tipo": "devolucion",
+                "concepto": f"Devolución de anticipo — paquete {paquete_id}",
+                "descripcion": data.motivo or f"Anticipo no usado de {paquete.get('nombre_servicio', '')}".strip(),
+                "monto": monto_metodo,
+                "moneda": paquete.get("moneda", sede.get("moneda", "COP")),
+                "metodo_pago": metodo,
+                "fecha": today(sede).strftime("%Y-%m-%d") if sede else datetime.now().strftime("%Y-%m-%d"),
+                "registrado_por": current_user.get("email"),
+                "registrado_por_rol": current_user.get("rol"),
+                "cliente_id": paquete.get("cliente_id"),
+                "paquete_id": paquete_id,
+                "caja": "caja_menor",
+                "origen": "devolucion_anticipo",
+                "tipo_movimiento": "egreso",
+                "creado_en": datetime.now(),
+                "actualizado_en": datetime.now(),
+            }
+            await collection_cash_expenses.insert_one(doc)
+            egreso_id = doc["egreso_id"]
+
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    return {
+        "success": True,
+        "mensaje": (
+            f"{resultado['liquidado']} pasaron a saldo a favor del cliente"
+            if data.tipo == "saldo_a_favor"
+            else f"{resultado['liquidado']} devueltos al cliente (egreso registrado en caja)"
+        ),
+        "liquidado": resultado["liquidado"],
+        "saldo_a_favor": saldo_nuevo,
+        "egreso_id": egreso_id,
+        "anticipo": estado_anticipo(paquete),
+    }
+
+
+
+
+class MigrarPorSesionRequest(BaseModel):
+    aplicar: bool = Field(default=False, description="false = vista previa, no escribe nada")
+
+
+@router.post("/paquetes/{paquete_id}/migrar-por-sesion", response_model=dict)
+async def migrar_paquete_a_facturacion_por_sesion(
+    paquete_id: str,
+    data: MigrarPorSesionRequest = MigrarPorSesionRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Pasa un paquete que todavía no se ha facturado al modo "una factura por
+    sesión": cada sesión pasa a valer el precio de una sesión y lo ya pagado
+    se convierte en anticipo del paquete, que cubre las sesiones a medida que
+    se van facturando.
+
+    Por defecto es VISTA PREVIA: devuelve qué cambiaría sin escribir nada.
+
+    No toca paquetes ya facturados ni sesiones que tengan su propia factura:
+    eso ya está contabilizado.
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede cambiar la facturación del paquete")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if current_user.get("rol") == "admin_sede" and paquete.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar paquetes de tu propia sede")
+    if modo_facturacion(paquete) == MODO_POR_SESION:
+        raise HTTPException(status_code=400, detail="Este paquete ya se factura sesión por sesión")
+
+    ligadas = await citas_ligadas_paquete(paquete)
+    if _facturacion_del_paquete(paquete, ligadas):
+        raise HTTPException(
+            status_code=400,
+            detail="Este paquete ya se facturó completo. Para cambiarlo habría que anular esa factura, "
+                   "así que se deja como está.",
+        )
+
+    origen_id = str(paquete.get("cita_origen_id") or "")
+    sesiones_totales = int(paquete.get("sesiones_totales", 0) or 0)
+    if sesiones_totales <= 0:
+        raise HTTPException(status_code=400, detail="El paquete no tiene sesiones configuradas")
+
+    # Precio del paquete completo: lo que cobró la cita de compra (o, si ya
+    # no lo tiene, el valor por sesión guardado × sesiones).
+    valor_por_sesion_actual = round(float(paquete.get("valor_por_sesion", 0) or 0), 2)
+    valor_paquete = round(float(paquete.get("valor_paquete") or 0), 2)
+    for cita, idx in ligadas:
+        if str(cita["_id"]) == origen_id:
+            subtotal_origen = round(float((cita.get("servicios") or [])[idx].get("subtotal", 0) or 0), 2)
+            if subtotal_origen > valor_por_sesion_actual:
+                valor_paquete = subtotal_origen
+    if valor_paquete <= 0:
+        valor_paquete = round(valor_por_sesion_actual * sesiones_totales, 2)
+    valor_sesion = round(valor_paquete / sesiones_totales, 2)
+
+    cambios, anticipos, avisos = [], [], []
+    for cita, idx in ligadas:
+        cita_id = str(cita["_id"])
+        linea = (cita.get("servicios") or [])[idx]
+        cantidad = int(linea.get("cantidad", 1) or 1)
+        estado = estado_cita(cita)
+        pagos = [p for p in (cita.get("historial_pagos") or []) if float(p.get("monto", 0) or 0) > 0]
+
+        if cita.get("estado_factura") == "facturado":
+            avisos.append(f"La sesión del {str(cita.get('fecha'))[:10]} ya tiene su propia factura: se deja como está.")
+            continue
+        if estado in ESTADOS_NO_CUENTAN:
+            if pagos:
+                avisos.append(
+                    f"La cita cancelada del {str(cita.get('fecha'))[:10]} tiene pagos: no se tocan, revísalos aparte."
+                )
+            continue
+
+        nuevo_subtotal = round(valor_sesion * cantidad, 2)
+        cambios.append({
+            "cita_id": cita_id,
+            "fecha": str(cita.get("fecha") or "")[:10],
+            "es_compra": cita_id == origen_id,
+            "precio_antes": round(float(linea.get("subtotal", 0) or 0), 2),
+            "precio_despues": nuevo_subtotal,
+            "pagos_a_anticipo": round(sum(float(p.get("monto", 0) or 0) for p in pagos), 2),
+        })
+        for p in pagos:
+            anticipos.append({
+                "fecha": p.get("fecha") or datetime.now(),
+                "monto": round(float(p.get("monto", 0) or 0), 2),
+                "metodo": (p.get("metodo") or "efectivo").lower().strip(),
+                "tipo": "anticipo_paquete",
+                "registrado_por": p.get("registrado_por"),
+                "notas": p.get("notas"),
+                "cita_id": cita_id,
+                "consumos": [],
+            })
+
+    # Pagos viejos que quedaron solo en el paquete (nunca pasaron por caja):
+    # se pasan a la bolsa para poder usarlos, marcados para no contarlos otra
+    # vez en días ya cerrados.
+    sin_cita = [p for p in (paquete.get("historial_pagos") or []) if float(p.get("monto", 0) or 0) > 0]
+    for p in sin_cita:
+        anticipos.append({
+            "fecha": p.get("fecha") or datetime.now(),
+            "monto": round(float(p.get("monto", 0) or 0), 2),
+            "metodo": (p.get("metodo") or "efectivo").lower().strip(),
+            "tipo": "anticipo_paquete",
+            "registrado_por": p.get("registrado_por"),
+            "notas": p.get("notas"),
+            "sin_caja": True,
+            "consumos": [],
+        })
+    if sin_cita:
+        avisos.append(
+            f"{len(sin_cita)} pago(s) que estaban solo en el paquete pasan al anticipo. "
+            "Sirven para cubrir sesiones, pero no se suman otra vez a caja."
+        )
+
+    anticipo_total = round(sum(a["monto"] for a in anticipos), 2)
+    plan = {
+        "success": True,
+        "aplicado": data.aplicar,
+        "paquete_id": paquete_id,
+        "nombre_servicio": paquete.get("nombre_servicio"),
+        "sesiones_totales": sesiones_totales,
+        "valor_paquete": valor_paquete,
+        "valor_por_sesion": valor_sesion,
+        "anticipo_total": anticipo_total,
+        "sesiones_cubiertas": int(anticipo_total // valor_sesion) if valor_sesion else 0,
+        "citas": cambios,
+        "avisos": avisos,
+    }
+    if not data.aplicar:
+        return plan
+
+    for cambio in cambios:
+        cita = next(c for c, _ in ligadas if str(c["_id"]) == cambio["cita_id"])
+        idx = next(i for c, i in ligadas if str(c["_id"]) == cambio["cita_id"])
+        servicios = cita.get("servicios") or []
+        servicios[idx] = {
+            **servicios[idx],
+            "precio": valor_sesion,
+            "subtotal": cambio["precio_despues"],
+            "precio_personalizado": False,
+        }
+        set_cita = {
+            "servicios": servicios,
+            "historial_pagos": [],
+            "abono": 0,
+            "pagos_en_anticipo": paquete_id,
+            "ultima_actualizacion": datetime.now(),
+        }
+        set_cita.update(_recalcular_totales_cita({**cita, "abono": 0}, servicios))
+        await collection_citas.update_one({"_id": cita["_id"]}, {"$set": set_cita})
+
+    await collection_client_packages.update_one(
+        {"paquete_id": paquete_id},
+        {
+            "$set": {
+                "modo_facturacion": MODO_POR_SESION,
+                "valor_paquete": valor_paquete,
+                "valor_por_sesion": valor_sesion,
+                "anticipos": anticipos,
+                "historial_pagos": [],
+                "migrado_por_sesion": {
+                    "fecha": datetime.now(),
+                    "por": current_user.get("email"),
+                    "anticipo_total": anticipo_total,
+                },
+            }
+        },
+    )
+    resumen = await sincronizar_paquete(paquete_id) or {}
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    plan["anticipo"] = estado_anticipo(paquete)
+    plan["resumen"] = {k: v for k, v in resumen.items() if k != "numeros"}
+    plan["mensaje"] = (
+        f"Listo: cada sesión vale {valor_sesion} y quedan {plan['anticipo']['disponible']} de anticipo "
+        f"para cubrir las próximas."
+    )
+    return plan
 
 
 @router.post("/{cita_id}/asociar-paquete", response_model=dict)
@@ -4439,12 +4859,18 @@ async def asociar_cita_a_paquete(
         "ultima_actualizacion": datetime.now(),
     }
     if not facturada:
-        # La sesión la cubre el paquete. Lo que el cliente haya pagado en esta
-        # cita (ej. la cuota de $80.000) no se toca: sigue en caja y ahora
-        # suma como abono del paquete.
-        servicios[idx] = {**linea, "precio": 0, "subtotal": 0, "precio_personalizado": False}
-        set_cita[f"servicios.{idx}.precio"] = 0
-        set_cita[f"servicios.{idx}.subtotal"] = 0
+        # Modo "por sesión": la sesión vale una sesión del paquete y se
+        # factura sola contra el anticipo. Modo viejo: la cubre la factura
+        # del paquete, así que pasa a $0. Lo que el cliente haya pagado en
+        # esta cita no se toca: sigue en caja y suma como abono del paquete.
+        precio_sesion = (
+            round(float(paquete.get("valor_por_sesion", 0) or 0), 2)
+            if modo_facturacion(paquete) == MODO_POR_SESION else 0
+        )
+        subtotal_sesion = round(precio_sesion * cantidad, 2)
+        servicios[idx] = {**linea, "precio": precio_sesion, "subtotal": subtotal_sesion, "precio_personalizado": False}
+        set_cita[f"servicios.{idx}.precio"] = precio_sesion
+        set_cita[f"servicios.{idx}.subtotal"] = subtotal_sesion
         set_cita[f"servicios.{idx}.precio_personalizado"] = False
         set_cita.update(_recalcular_totales_cita(cita, servicios))
     else:

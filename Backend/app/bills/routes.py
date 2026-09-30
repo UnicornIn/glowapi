@@ -36,6 +36,10 @@ from app.commissions.comision_engine import (
 )
 from app.commissions.comision_context import construir_contexto, recalcular_comisiones_periodo
 from app.commissions.comision_paquetes import porcentaje_comision_servicio, registrar_comision_servicios
+from app.scheduling.submodules.quotes.anticipos_paquete import (
+    consumir_anticipo,
+    devolver_anticipo,
+)
 from app.scheduling.submodules.quotes.paquetes_helpers import (
     procesar_paquete_servicio,
     propagar_facturacion_a_paquete,
@@ -439,8 +443,19 @@ async def _ejecutar_anulacion(
         except Exception as e:
             print(f"⚠️ No se pudo actualizar cita {origen_id}: {e}")
 
-    # 6️⃣ Paquetes de sesiones: si esta era la factura del paquete, las
-    # sesiones que la heredaron dejan de estar "Facturada" también.
+    # 6️⃣ Paquetes de sesiones. En modo "por sesión", lo que esta factura
+    # tomó del anticipo vuelve a la bolsa y queda disponible otra vez.
+    anticipo_devuelto = 0.0
+    if numero_comprobante:
+        try:
+            anticipo_devuelto = await devolver_anticipo(numero_comprobante)
+            if anticipo_devuelto:
+                print(f"↩️ Anticipo devuelto al paquete: {anticipo_devuelto}")
+        except Exception as e:
+            print(f"⚠️ No se pudo devolver el anticipo del paquete: {e}")
+
+    # Paquete viejo (una factura para todo): las sesiones que heredaron esa
+    # factura dejan de estar "Facturada" también.
     if numero_comprobante:
         try:
             paquetes_facturados = await collection_client_packages.find(
@@ -479,6 +494,7 @@ async def _ejecutar_anulacion(
 
     return {
         "productos_revertidos": len(movimientos_inv),
+        "anticipo_devuelto": anticipo_devuelto,
         "comisiones_afectadas": comisiones_afectadas,
         "giftcard_revertida": giftcard_revertida,
         "cita_actualizada": cita_actualizada,
@@ -519,7 +535,7 @@ async def facturar_cita_o_venta(
         paquete_ctx = await contexto_facturacion_paquete(documento)
         if paquete_ctx and paquete_ctx["rol"] == "sesion":
             raise HTTPException(status_code=400, detail=paquete_ctx["mensaje"])
-        if paquete_ctx and paquete_ctx["pagos_sin_cita"]:
+        if paquete_ctx and paquete_ctx.get("pagos_sin_cita"):
             raise HTTPException(
                 status_code=400,
                 detail=f"El paquete tiene {paquete_ctx['pagos_sin_cita']} pago(s) guardados solo en el paquete (no aparecen en caja). "
@@ -718,7 +734,7 @@ async def facturar_cita_o_venta(
     # ⭐ Paquete: si alguna sesión suelta ya se facturó por su cuenta (antes
     # de asociarla al paquete), ese valor ya está en otra factura — se
     # descuenta de la línea del paquete para no facturarlo dos veces.
-    if paquete_ctx and paquete_ctx["ya_facturado"]:
+    if paquete_ctx and paquete_ctx.get("ya_facturado"):
         linea_items = [it for it in items if it.get("tipo") == "servicio"]
         idx_linea = paquete_ctx["indice_linea"]
         if idx_linea < len(linea_items):
@@ -904,10 +920,33 @@ async def facturar_cita_o_venta(
     # ====================================
     # 7️⃣ HISTORIAL Y DESGLOSE DE PAGOS
     # ====================================
-    historial_pagos = documento.get("historial_pagos", [])
-    if paquete_ctx:
-        # Todo lo pagado en cualquier sesión del paquete (con su fecha).
+    historial_pagos = list(documento.get("historial_pagos", []) or [])
+    if paquete_ctx and paquete_ctx["rol"] == "compra":
+        # Paquete viejo: una sola factura con todo lo pagado en sus sesiones.
         historial_pagos = paquete_ctx["pagos"]
+    elif paquete_ctx and paquete_ctx["rol"] == "sesion_independiente":
+        # Modo "por sesión": lo que falte para cubrir ESTA sesión sale del
+        # anticipo del paquete, con la fecha y el método reales del abono
+        # (la factura muestra ambos). Si no alcanza no se factura: primero
+        # hay que registrar el pago — no se factura plata que no entró.
+        ya_pagado = round(sum(float(p.get("monto", 0) or 0) for p in historial_pagos), 2)
+        falta = round(total_final - ya_pagado, 2)
+        if falta > 0:
+            prueba = await consumir_anticipo(
+                paquete_ctx["paquete"], falta,
+                numero_comprobante=numero_comprobante, cita_id=id, dry_run=True,
+            )
+            if prueba["faltante"] > 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"El anticipo del paquete no alcanza para esta sesión: faltan {prueba['faltante']} "
+                           f"{moneda_sede} de {total_final}. Registra el pago de la sesión y vuelve a facturar.",
+                )
+            consumo = await consumir_anticipo(
+                paquete_ctx["paquete"], falta,
+                numero_comprobante=numero_comprobante, cita_id=id, fecha_factura=fecha_actual,
+            )
+            historial_pagos = historial_pagos + consumo["pagos"]
     if not historial_pagos:
         raise HTTPException(status_code=400, detail="No se puede facturar: la cita no tiene pagos registrados")
 
@@ -992,7 +1031,7 @@ async def facturar_cita_o_venta(
                 "saldo_pendiente": 0,
                 # La cita de compra de un paquete conserva su propio abono: el
                 # resto se pagó en otras sesiones (cada una guarda el suyo).
-                "abono": documento.get("abono", 0) if paquete_ctx else total_final,
+                "abono": documento.get("abono", 0) if (paquete_ctx or {}).get("rol") == "compra" else total_final,
                 "fecha_facturacion": fecha_actual,
                 "numero_comprobante": numero_comprobante,
                 "facturado_por": current_user.get("email"),

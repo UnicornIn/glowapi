@@ -1243,6 +1243,10 @@ async def registrar_pago_paquete(
     de cada pago.
     """
     from app.scheduling.submodules.quotes.paquetes_helpers import citas_ligadas_paquete
+    from app.scheduling.submodules.quotes.paquetes_helpers import sincronizar_paquete
+    from app.scheduling.submodules.quotes.anticipos_paquete import (
+        MODO_POR_SESION, modo_facturacion, registrar_anticipo,
+    )
 
     if current_user.get("rol") not in ["admin_sede", "super_admin", "recepcionista", "call_center"]:
         raise HTTPException(403, "No autorizado para registrar pagos")
@@ -1252,6 +1256,21 @@ async def registrar_pago_paquete(
     # vuelve a agendar): se descuenta del crédito del cliente.
     if metodo not in METODOS_PAGO_PAQUETE and metodo != "saldo_a_favor":
         raise HTTPException(400, f"Método de pago inválido: '{data.metodo}'")
+
+    paquete_doc = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete_doc:
+        raise HTTPException(404, "Paquete de sesiones no encontrado")
+    if modo_facturacion(paquete_doc) == MODO_POR_SESION:
+        # Modo "por sesión": el dinero es un anticipo del paquete, no el pago
+        # de una sesión. Cada sesión toma lo suyo al facturarse.
+        if metodo in ("giftcard", "saldo_a_favor"):
+            raise HTTPException(400, f"'{metodo}' mueve saldo en otra parte: regístralo en la sesión, no como anticipo.")
+        await registrar_anticipo(
+            paquete_id, monto=round(float(data.monto), 2), metodo=metodo,
+            registrado_por=current_user.get("email"), notas=data.notas, cita_id=data.cita_id,
+        )
+        await sincronizar_paquete(paquete_id)
+        return await _paquete_con_pagos(paquete_id)
 
     paquete_actual = await _paquete_con_pagos(paquete_id)
     saldo_pendiente_actual = paquete_actual["saldo_pendiente"]

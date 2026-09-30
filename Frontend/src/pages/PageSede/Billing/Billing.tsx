@@ -14,6 +14,7 @@ import type { Factura } from "../../../types/factura"
 import { FacturaService } from "../Sales-invoiced/facturas"
 import { DEFAULT_PERIOD } from "../../../lib/period"
 import { toLocalYMD } from "../../../lib/dateFormat"
+import { useSearchParams } from "react-router-dom"
 import { useAuth } from "../../../components/Auth/AuthContext"
 import {
   formatCurrencyMetric,
@@ -236,6 +237,21 @@ export default function Billing() {
   const [cachedFacturas, setCachedFacturas] = useState<Factura[]>([])
 
 
+  // Llegada desde la agenda con ?cita=<id>&fecha=<YYYY-MM-DD>: se muestra ese
+  // día y se abre el detalle de esa cita, sin que el usuario la busque.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const citaSolicitada = searchParams.get("cita")
+  const fechaSolicitada = searchParams.get("fecha")
+
+  useEffect(() => {
+    if (!fechaSolicitada) return
+    const [y, m, d] = fechaSolicitada.split("-").map(Number)
+    if (!y || !m || !d) return
+    const dia = new Date(y, m - 1, d)
+    handlePeriodoChange("rango", { from: dia, to: dia })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fechaSolicitada])
+
   const appliedRange = useMemo(
     () => getGlobalRange(period, dateRange),
     [period, dateRange],
@@ -394,6 +410,21 @@ export default function Billing() {
     void fetchFacturasForRange()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appliedRange.start_date, appliedRange.end_date])
+
+
+  // Ya cargadas las citas del día, se abre la que pidió la agenda.
+  useEffect(() => {
+    if (!citaSolicitada || loadingAppointments) return
+    const cita = allAppointments.find((a) => a._id === citaSolicitada)
+    if (!cita) return
+    setFilterStatus(isFacturada(cita) ? "facturadas" : "pendientes")
+    setSelectedAppointment(cita)
+    const params = new URLSearchParams(searchParams)
+    params.delete("cita")
+    params.delete("fecha")
+    setSearchParams(params, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [citaSolicitada, loadingAppointments, allAppointments])
 
   useEffect(() => {
     loadMetrics()
@@ -973,7 +1004,11 @@ export default function Billing() {
 
                       {/* Value */}
                       <div className="w-24 text-right text-sm font-bold text-gray-900">
-                        {esSesionPaquete ? <span className="text-xs font-medium text-gray-400">En paquete</span> : fmtCOP(a.valor_total)}
+                        {esSesionPaquete && !a.valor_total ? (
+                          <span className="text-xs font-medium text-gray-400">En paquete</span>
+                        ) : (
+                          fmtCOP(a.valor_total)
+                        )}
                       </div>
                     </div>
                   )

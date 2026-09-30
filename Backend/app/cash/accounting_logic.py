@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from app.database.mongo import (
     collection_citas as appointments,
     collection_sales as sales,
+    collection_client_packages as client_packages,
     collection_locales as locales,
     db
 )
@@ -537,6 +538,69 @@ async def _movimientos_efectivo_migrado(sede_id: str, fecha: str) -> Dict:
 # (código original sin modificaciones)
 # ============================================================
 
+async def _anticipos_paquete_del_dia(sede_id: str, fecha: str, solo_efectivo: bool = False) -> List[Dict]:
+    """
+    Abonos de paquetes que ENTRARON este día y siguen en la bolsa (todavía
+    no los tomó ninguna factura de sesión).
+
+    Un paquete que se factura sesión por sesión recibe el abono antes de
+    prestar el servicio: esa plata entró a caja el día del abono. Cuando una
+    sesión se factura, su pedazo sale de la bolsa y pasa a la factura, que
+    lo cuenta con la misma fecha y el mismo método. Así cada peso se cuenta
+    una sola vez, el día en que el cliente lo pagó.
+
+    Devolver el anticipo al cliente no descuenta de acá: eso entra como
+    egreso el día de la devolución.
+    """
+    fecha_dt = datetime.strptime(fecha, "%Y-%m-%d")
+    fecha_inicio = fecha_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    fecha_fin = fecha_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    match_pago = {
+        "anticipos.fecha": {"$gte": fecha_inicio, "$lte": fecha_fin},
+        # Anticipos viejos que nunca pasaron por caja (estaban solo en el
+        # paquete): no se cuentan ahora para no mover días ya cerrados.
+        "anticipos.sin_caja": {"$ne": True},
+    }
+    if solo_efectivo:
+        match_pago["anticipos.metodo"] = "efectivo"
+
+    pipeline = [
+        {"$match": {"sede_id": sede_id, "anticipos": {"$exists": True, "$ne": []}}},
+        {"$unwind": "$anticipos"},
+        {"$match": match_pago},
+    ]
+
+    filas = []
+    async for doc in client_packages.aggregate(pipeline, allowDiskUse=True):
+        anticipo = doc["anticipos"]
+        monto = float(anticipo.get("monto", 0) or 0)
+        consumido = sum(float(c.get("monto", 0) or 0) for c in anticipo.get("consumos") or [])
+        pendiente = round(monto - consumido, 2)
+        if pendiente <= 0:
+            continue  # ya se lo llevó la factura de una sesión, se cuenta allá
+        filas.append({
+            "fecha": anticipo.get("fecha"),
+            "monto": pendiente,
+            "metodo": anticipo.get("metodo") or "efectivo",
+            "tipo": "anticipo_paquete",
+            "paquete_id": doc.get("paquete_id"),
+            "cliente_id": doc.get("cliente_id"),
+            "nombre_servicio": doc.get("nombre_servicio", ""),
+            "registrado_por": anticipo.get("registrado_por", ""),
+            "notas": anticipo.get("notas") or "",
+        })
+    return filas
+
+
+async def calcular_ingresos_efectivo_anticipos(sede_id: str, fecha: str) -> Dict:
+    filas = await _anticipos_paquete_del_dia(sede_id, fecha, solo_efectivo=True)
+    return {
+        "total": round(sum(f["monto"] for f in filas), 2),
+        "cantidad_pagos": len(filas),
+    }
+
+
 async def calcular_ingresos_efectivo_appointments(
     sede_id: str,
     fecha: str
@@ -560,6 +624,7 @@ async def calcular_ingresos_efectivo_appointments(
         {
             "$match": {
                 "historial_pagos.metodo": "efectivo",
+                "historial_pagos.sin_caja": {"$ne": True},
                 # ✅ Filtramos por fecha del PAGO, no de la cita
                 "historial_pagos.fecha": {
                     "$gte": fecha_inicio,
@@ -735,7 +800,14 @@ async def calcular_ingresos_por_metodo_pago(
             metodos[metodo_norm] = 0
         metodos[metodo_norm] += item["total"]
 
-    # 3. Sales migradas (desglose_pagos)
+    # 3. Anticipos de paquete todavía en la bolsa
+    for anticipo in await _anticipos_paquete_del_dia(sede_id, fecha):
+        metodo_norm = _normalizar_metodo(anticipo["metodo"])
+        if metodo_norm not in metodos:
+            metodos[metodo_norm] = 0
+        metodos[metodo_norm] += anticipo["monto"]
+
+    # 4. Sales migradas (desglose_pagos)
     for venta in await sales.find({
         "sede_id"  : sede_id,
         "fecha_pago": {"$gte": fecha_inicio, "$lte": fecha_fin},
@@ -818,6 +890,10 @@ async def calcular_ingresos_por_metodo_pago(
     resultado_abonos_sales = await sales.aggregate(pipeline_abonos_sales, allowDiskUse=True).to_list(None)
     if resultado_abonos_sales:
         total_abonos += resultado_abonos_sales[0]["total"]
+
+    # El anticipo de un paquete también es un abono: el cliente paga antes de
+    # que se preste el servicio.
+    total_abonos += sum(a["monto"] for a in await _anticipos_paquete_del_dia(sede_id, fecha))
 
     metodos["abonos_informativos"] = total_abonos
 
@@ -970,7 +1046,26 @@ async def _obtener_ventas_dia_sistema(
         })
 
     # =========================================================
-    # 3. SALES MIGRADAS (sin historial_pagos, usando desglose_pagos)
+    # 3. ANTICIPOS DE PAQUETE (abono recibido, sesión aún sin facturar)
+    # =========================================================
+    for anticipo in await _anticipos_paquete_del_dia(sede_id, fecha):
+        ventas_formateadas.append({
+            "fecha"               : anticipo["fecha"],
+            "nombre_cliente"      : anticipo.get("cliente_id", ""),
+            "cedula_cliente"      : "",
+            "email_cliente"       : "",
+            "telefono_cliente"    : "",
+            "medio_pago"          : anticipo["metodo"].replace("_", " ").title(),
+            "tipo_movimiento"     : "Anticipo de paquete",
+            "id_movimiento"       : anticipo.get("paquete_id", ""),
+            "nro_comprobante"     : "",
+            "flujo_periodo"       : anticipo["monto"],
+            "usuario_modificacion": anticipo.get("registrado_por", ""),
+            "notas"               : f"Anticipo {anticipo.get('nombre_servicio', '')} ({anticipo.get('paquete_id', '')})",
+        })
+
+    # =========================================================
+    # 4. SALES MIGRADAS (sin historial_pagos, usando desglose_pagos)
     # Estas sí se buscan por fecha_pago porque no tienen historial
     # =========================================================
     ventas_migradas = await sales.find({
@@ -1082,6 +1177,20 @@ async def _obtener_movimientos_efectivo_dia_sistema(
             "descripcion": f"{cita.get('cliente_nombre', '')} - cita",
             "comprobante": cita.get("numero_comprobante", ""),
             "ingreso"    : pago.get("monto", 0),
+            "egreso"     : 0,
+            "saldo"      : 0
+        })
+
+    # =========================================================
+    # 1.b ANTICIPOS DE PAQUETE EN EFECTIVO (aún en la bolsa)
+    # =========================================================
+    for anticipo in await _anticipos_paquete_del_dia(sede_id, fecha, solo_efectivo=True):
+        movimientos.append({
+            "fecha"      : anticipo["fecha"],
+            "tipo"       : "INGRESO",
+            "descripcion": f"Anticipo paquete {anticipo.get('nombre_servicio', '')}".strip(),
+            "comprobante": anticipo.get("paquete_id", ""),
+            "ingreso"    : anticipo["monto"],
             "egreso"     : 0,
             "saldo"      : 0
         })
@@ -1245,14 +1354,18 @@ async def calcular_resumen_dia(
         # ── Rama normal ───────────────────────────────────────
         ingresos_appointments  = await calcular_ingresos_efectivo_appointments(sede_id, fecha)
         ingresos_sales         = await calcular_ingresos_efectivo_sales(sede_id, fecha)
+        ingresos_anticipos     = await calcular_ingresos_efectivo_anticipos(sede_id, fecha)
         ingresos_discriminados = await calcular_ingresos_por_metodo_pago(sede_id, fecha)
         egresos                = await calcular_egresos_efectivo(sede_id, fecha)
 
-        total_ingresos_efectivo = ingresos_appointments["total"] + ingresos_sales["total"]
+        total_ingresos_efectivo = (
+            ingresos_appointments["total"] + ingresos_sales["total"] + ingresos_anticipos["total"]
+        )
 
         ingresos_info = {
             "appointments_no_facturadas": ingresos_appointments["total"],
             "sales_facturadas"          : ingresos_sales["total"],
+            "anticipos_paquete"         : ingresos_anticipos["total"],
             "total"                     : total_ingresos_efectivo,
             "fuente"                    : "sistema"
         }
