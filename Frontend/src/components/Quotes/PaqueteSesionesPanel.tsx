@@ -9,6 +9,8 @@ import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { Loader2, Package, X, Link2, Unlink, ChevronRight } from "lucide-react";
 import { confirmAction } from "../ui/confirm-dialog";
+import { Ayuda } from "../ui/ayuda";
+import MigrarPaquetePorSesion from "./MigrarPaquetePorSesion";
 import { formatDateDMY } from "../../lib/dateFormat";
 import { formatCurrencyNoDecimals } from "../../lib/currency";
 import {
@@ -264,6 +266,18 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
                       <span className="text-red-600 font-semibold"> · {resumen.sobrecupo} de más</span>
                     )}
                   </div>
+                  {data?.paquete?.anticipo && (
+                    <div className="text-slate-700">
+                      Anticipo: {dinero(data.paquete.anticipo.disponible)} disponible de{" "}
+                      {dinero(data.paquete.anticipo.total)} abonado
+                      {data.paquete.anticipo.consumido > 0 &&
+                        ` · ${dinero(data.paquete.anticipo.consumido)} ya facturado`}
+                      <Ayuda
+                        className="ml-1"
+                        texto="Cada sesión se factura sola y descuenta su valor de este anticipo. Cuando se acaba, hay que registrar un pago nuevo para poder facturar."
+                      />
+                    </div>
+                  )}
                   {sesionActual && textoComision(sesionActual) && (
                     <div className="text-emerald-700">
                       {sesionActual.comision?.profesional_nombre ? `${sesionActual.comision.profesional_nombre}: ` : ""}
@@ -359,6 +373,18 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
                         Hay {resumen.sobrecupo} sesión(es) más de las que tiene el paquete. Desasocia las que no correspondan.
                       </div>
                     )}
+                    {puedeGestionar && data.paquete?.modo_facturacion !== "por_sesion" && (
+                      <MigrarPaquetePorSesion
+                        token={token}
+                        paqueteId={data.paquete.paquete_id}
+                        moneda={data.paquete.moneda}
+                        onMigrado={() => {
+                          void cargar(data.paquete.paquete_id);
+                          onCambio?.();
+                        }}
+                      />
+                    )}
+
                     {(data.reparto_profesionales?.length || 0) > 0 && (
                       <div className="space-y-1.5">
                         <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">

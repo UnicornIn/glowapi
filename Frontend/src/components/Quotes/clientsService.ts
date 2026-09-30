@@ -367,6 +367,13 @@ export interface PaqueteCliente {
   // Factura que cubre el paquete (si ya se facturó)
   facturacion?: { numero_comprobante?: string; fecha_facturacion?: string; cita_id?: string } | null;
   valor_por_sesion: number;
+  // Precio del paquete completo (modo "por sesión": la cita de compra solo
+  // cobra una sesión, el resto entra como anticipo).
+  valor_paquete?: number;
+  /** "por_sesion": cada sesión se factura sola contra el anticipo. "paquete": una sola factura (paquetes antiguos). */
+  modo_facturacion?: "por_sesion" | "paquete";
+  anticipo?: AnticipoPaquete | null;
+  anticipos?: AnticipoEntrada[];
   moneda: string;
   activo: boolean;
   // Ledger de pago del paquete (Fase 3) — abono es el único campo real
@@ -380,6 +387,93 @@ export interface PaqueteCliente {
   historial_pagos: PagoPaquete[];
   // Todos los pagos del paquete (los de cada sesión + los sin sesión), por fecha.
   pagos?: PagoConsolidadoPaquete[];
+}
+
+export interface AnticipoPaquete {
+  /** Todo lo que el cliente ha abonado al paquete */
+  total: number;
+  /** Lo que ya se llevaron las facturas de las sesiones */
+  consumido: number;
+  /** Lo que se pasó a saldo a favor o se devolvió */
+  liquidado: number;
+  /** Lo que queda para cubrir próximas sesiones */
+  disponible: number;
+  entradas: number;
+}
+
+export interface AnticipoEntrada {
+  fecha: string;
+  monto: number;
+  metodo: string;
+  registrado_por?: string;
+  notas?: string | null;
+  consumido: number;
+  disponible: number;
+  facturas: { numero_comprobante?: string; monto: number; cita_id?: string }[];
+  liquidacion?: { tipo: "saldo_a_favor" | "devolucion"; monto: number; fecha: string; motivo?: string | null } | null;
+}
+
+export async function registrarAnticipoPaquete(
+  token: string,
+  paqueteId: string,
+  datos: { monto: number; metodo: string; notas?: string; cita_id?: string },
+): Promise<{ anticipo: AnticipoPaquete; mensaje: string }> {
+  return _postJson(
+    `${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/anticipos`,
+    token,
+    datos,
+    'No se pudo registrar el anticipo del paquete',
+  );
+}
+
+export async function liquidarAnticipoPaquete(
+  token: string,
+  paqueteId: string,
+  datos: { tipo: "saldo_a_favor" | "devolucion"; motivo?: string; monto?: number },
+): Promise<{ mensaje: string; liquidado: number; anticipo: AnticipoPaquete }> {
+  return _postJson(
+    `${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/anticipo/liquidar`,
+    token,
+    datos,
+    'No se pudo liquidar el anticipo del paquete',
+  );
+}
+
+export interface MigracionPorSesion {
+  aplicado: boolean;
+  paquete_id: string;
+  nombre_servicio?: string;
+  sesiones_totales: number;
+  valor_paquete: number;
+  valor_por_sesion: number;
+  anticipo_total: number;
+  /** Sesiones que quedan cubiertas con lo ya pagado */
+  sesiones_cubiertas: number;
+  citas: {
+    cita_id: string;
+    fecha: string;
+    es_compra: boolean;
+    precio_antes: number;
+    precio_despues: number;
+    pagos_a_anticipo: number;
+  }[];
+  avisos: string[];
+  mensaje?: string;
+  anticipo?: AnticipoPaquete;
+}
+
+/** Vista previa (aplicar=false) o cambio real del paquete a "una factura por sesión". */
+export async function migrarPaquetePorSesion(
+  token: string,
+  paqueteId: string,
+  aplicar: boolean,
+): Promise<MigracionPorSesion> {
+  return _postJson(
+    `${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/migrar-por-sesion`,
+    token,
+    { aplicar },
+    'No se pudo cambiar la facturación del paquete',
+  );
 }
 
 export interface PagoConsolidadoPaquete {

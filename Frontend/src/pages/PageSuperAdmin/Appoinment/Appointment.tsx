@@ -380,7 +380,10 @@ const CalendarScheduler: React.FC = () => {
   ]);
 
   const handleCitaClick = useCallback((apt: Appointment) => {
-    console.log('Cita clickeada:', apt);
+    // Al abrir el detalle, el panel tapa la cita y el mouse nunca "sale" de
+    // ella: sin esto el globo de la agenda quedaba congelado en pantalla.
+    if (tooltipTimeoutRef.current) clearTimeout(tooltipTimeoutRef.current);
+    setCitaTooltip({ visible: false, x: 0, y: 0, cita: null });
     setSelectedAppointment(apt);
     setShowAppointmentDetails(true);
   }, []);
