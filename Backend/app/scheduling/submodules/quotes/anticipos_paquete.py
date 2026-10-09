@@ -323,7 +323,10 @@ def pagos_anticipo_para_panel(paquete: dict) -> list:
             "notas": entrada.get("notas"),
             "origen": "anticipo",
             "indice": i,
-            "en_caja": True,
+            # Los anticipos viejos migrados desde el paquete nunca pasaron por
+            # caja y siguen sin contarse (ver `sin_caja`).
+            "sin_caja": bool(entrada.get("sin_caja")),
+            "en_caja": not entrada.get("sin_caja"),
             "consumido": _consumido(entrada),
             "disponible": disponible_entrada(entrada),
             "facturas": [
