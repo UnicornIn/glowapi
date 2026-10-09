@@ -11,6 +11,7 @@ import { Loader2, Package, X, Link2, Unlink, ChevronRight } from "lucide-react";
 import { confirmAction } from "../ui/confirm-dialog";
 import { Ayuda } from "../ui/ayuda";
 import MigrarPaquetePorSesion from "./MigrarPaquetePorSesion";
+import FacturarSesionesCubiertas from "./FacturarSesionesCubiertas";
 import { formatDateDMY } from "../../lib/dateFormat";
 import { formatCurrencyNoDecimals } from "../../lib/currency";
 import {
@@ -373,6 +374,18 @@ const PaqueteSesionesPanel: React.FC<Props> = ({
                         Hay {resumen.sobrecupo} sesión(es) más de las que tiene el paquete. Desasocia las que no correspondan.
                       </div>
                     )}
+                    {puedeGestionar && data.paquete?.anticipo && (
+                      <FacturarSesionesCubiertas
+                        token={token}
+                        paqueteId={data.paquete.paquete_id}
+                        moneda={data.paquete.moneda}
+                        onFacturado={() => {
+                          void cargar(data.paquete.paquete_id);
+                          onCambio?.();
+                        }}
+                      />
+                    )}
+
                     {puedeGestionar && data.paquete?.modo_facturacion !== "por_sesion" && (
                       <MigrarPaquetePorSesion
                         token={token}

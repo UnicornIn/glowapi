@@ -42,6 +42,7 @@ from app.scheduling.submodules.quotes.anticipos_paquete import (
     modo_facturacion,
     estado_anticipo,
     pagos_anticipo_para_panel,
+    mover_pagos_cita_a_anticipo,
 )
 
 
@@ -271,6 +272,29 @@ async def sincronizar_paquete(paquete_id: Optional[str], dry_run: bool = False) 
     previas = {u.get("cita_id"): u for u in historial if u.get("cita_id") and not u.get("ajuste_manual")}
 
     ligadas = await citas_ligadas_paquete(paquete)
+
+    # Modo "por sesión": toda la plata del paquete vive en la bolsa. Un pago
+    # registrado en una sesión (ej. desde la agenda) se recoge acá, si no el
+    # abono quedaba atrapado en esa cita y el paquete mostraba "cobrado $0".
+    # No se tocan las citas ya facturadas (su plata es de su factura) ni las
+    # canceladas (su abono puede estar camino al saldo a favor).
+    if modo_facturacion(paquete) == MODO_POR_SESION:
+        recogidos = 0.0
+        for cita, _ in ligadas:
+            if cita.get("estado_factura") == "facturado" or estado_cita(cita) in ESTADOS_NO_CUENTAN:
+                continue
+            if not [p for p in (cita.get("historial_pagos") or []) if float(p.get("monto", 0) or 0) > 0]:
+                continue
+            if dry_run:
+                recogidos += round(sum(float(p.get("monto", 0) or 0) for p in cita["historial_pagos"]), 2)
+                continue
+            recogidos += await mover_pagos_cita_a_anticipo(cita, paquete_id)
+        if recogidos:
+            if not dry_run:
+                paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+                ligadas = await citas_ligadas_paquete(paquete)
+            print(f"💰 Paquete {paquete_id}: {recogidos} pasaron de las sesiones al anticipo")
+
     facturacion = _facturacion_del_paquete(paquete, ligadas)
 
     usadas = sum(int(u.get("sesiones", 1) or 1) for u in entradas_venta)

@@ -2736,6 +2736,49 @@ async def registrar_pago(
 
     moneda = cita.get("moneda", "COP")
 
+    # ⭐ Paquete en modo "por sesión": lo que el cliente paga es anticipo del
+    # PAQUETE, no pago de esta sesión — si se guardara en la cita, el abono
+    # quedaría atrapado en una sola sesión (el paquete mostraba "cobrado $0")
+    # y no podría cubrir las demás. Giftcard y saldo a favor siguen yendo a
+    # la cita: mueven saldo en otra parte y se liquidan ahí.
+    metodo_pedido = str(data.metodo_pago or "").lower().strip()
+    if metodo_pedido not in ("giftcard", "saldo_a_favor"):
+        for linea in cita.get("servicios") or []:
+            if not linea.get("paquete_id"):
+                continue
+            paquete_doc = await collection_client_packages.find_one({"paquete_id": linea["paquete_id"]})
+            if not paquete_doc or modo_facturacion(paquete_doc) != MODO_POR_SESION:
+                continue
+            monto_anticipo = round(float(data.monto), 2)
+            if monto_anticipo <= 0:
+                raise HTTPException(status_code=400, detail="Monto inválido")
+            estado_previo = estado_anticipo(paquete_doc)
+            valor_paquete = round(float(paquete_doc.get("valor_paquete") or 0), 2)
+            if valor_paquete and round(estado_previo["total"] + monto_anticipo, 2) > valor_paquete:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"El abono excede el valor del paquete: van {estado_previo['total']} de {valor_paquete}.",
+                )
+            await registrar_anticipo(
+                linea["paquete_id"],
+                monto=monto_anticipo,
+                metodo=metodo_pedido or "efectivo",
+                registrado_por=current_user.get("email"),
+                notas=getattr(data, "notas", None),
+                cita_id=cita_id,
+            )
+            await sincronizar_paquete(linea["paquete_id"])
+            paquete_doc = await collection_client_packages.find_one({"paquete_id": linea["paquete_id"]})
+            estado = estado_anticipo(paquete_doc)
+            return {
+                "success": True,
+                "mensaje": f"Anticipo de {fmt(monto_anticipo, moneda)} registrado al paquete",
+                "anticipo": estado,
+                "abono": estado["total"],
+                "saldo_pendiente": max(round(valor_paquete - estado["total"], 2), 0) if valor_paquete else 0,
+                "estado_pago": "pagado" if valor_paquete and estado["total"] >= valor_paquete else "abonado",
+            }
+
     # Fuente de verdad: saldo_pendiente
     saldo_pendiente_actual = round(float(cita.get("saldo_pendiente", 0)), 2)
 
@@ -4777,6 +4820,233 @@ async def migrar_paquete_a_facturacion_por_sesion(
         f"Listo: cada sesión vale {valor_sesion} y quedan {plan['anticipo']['disponible']} de anticipo "
         f"para cubrir las próximas."
     )
+    return plan
+
+
+
+
+class CorregirAnticipoRequest(BaseModel):
+    monto: Optional[float] = Field(default=None, gt=0)
+    metodo: Optional[str] = None
+    fecha: Optional[str] = Field(default=None, description="YYYY-MM-DD")
+    notas: Optional[str] = None
+    motivo: Optional[str] = None
+
+
+@router.patch("/paquetes/{paquete_id}/anticipos/{indice}", response_model=dict)
+async def corregir_anticipo_paquete(
+    paquete_id: str,
+    indice: int,
+    data: CorregirAnticipoRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Corrige un anticipo mal registrado (monto, método, fecha o nota). Lo que
+    ya se llevó alguna factura no se puede deshacer desde acá: primero hay
+    que anular esa factura.
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede corregir un anticipo")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if current_user.get("rol") == "admin_sede" and paquete.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar paquetes de tu propia sede")
+
+    anticipos = list(paquete.get("anticipos") or [])
+    if indice < 0 or indice >= len(anticipos):
+        raise HTTPException(status_code=404, detail="Anticipo no encontrado")
+
+    entrada = anticipos[indice]
+    consumido = round(sum(float(c.get("monto", 0) or 0) for c in entrada.get("consumos") or []), 2)
+    liquidado = round(float((entrada.get("liquidacion") or {}).get("monto") or 0), 2)
+
+    antes = {"monto": entrada.get("monto"), "metodo": entrada.get("metodo"), "fecha": entrada.get("fecha")}
+    if data.monto is not None:
+        monto_nuevo = round(float(data.monto), 2)
+        minimo = round(consumido + liquidado, 2)
+        if monto_nuevo < minimo:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Este anticipo ya tiene {minimo} usado en facturas o liquidado: no puede quedar por debajo. "
+                       "Anula esas facturas primero.",
+            )
+        entrada["monto"] = monto_nuevo
+    if data.metodo:
+        metodo = data.metodo.lower().strip()
+        if metodo in ("giftcard", "saldo_a_favor"):
+            raise HTTPException(status_code=400, detail=f"'{metodo}' no se maneja como anticipo del paquete")
+        entrada["metodo"] = metodo
+    if data.fecha:
+        try:
+            entrada["fecha"] = datetime.strptime(data.fecha[:10], "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Fecha inválida (YYYY-MM-DD)")
+    if data.notas is not None:
+        entrada["notas"] = data.notas
+    entrada["correcciones"] = (entrada.get("correcciones") or []) + [{
+        "antes": antes,
+        "por": current_user.get("email"),
+        "fecha": datetime.now(),
+        "motivo": data.motivo,
+    }]
+
+    await collection_client_packages.update_one(
+        {"paquete_id": paquete_id}, {"$set": {"anticipos": anticipos}}
+    )
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    return {"success": True, "mensaje": "Anticipo corregido", "anticipo": estado_anticipo(paquete)}
+
+
+@router.delete("/paquetes/{paquete_id}/anticipos/{indice}", response_model=dict)
+async def eliminar_anticipo_paquete(
+    paquete_id: str,
+    indice: int,
+    motivo: str = Query(..., min_length=3, description="Por qué se elimina (queda auditado)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Borra un anticipo que no debió registrarse (ej. el pago era de otro
+    servicio). Si ya lo usó una factura, primero hay que anularla.
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede eliminar un anticipo")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if current_user.get("rol") == "admin_sede" and paquete.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar paquetes de tu propia sede")
+
+    anticipos = list(paquete.get("anticipos") or [])
+    if indice < 0 or indice >= len(anticipos):
+        raise HTTPException(status_code=404, detail="Anticipo no encontrado")
+
+    entrada = anticipos[indice]
+    if entrada.get("consumos"):
+        comprobantes = ", ".join(str(c.get("numero_comprobante")) for c in entrada["consumos"])
+        raise HTTPException(
+            status_code=400,
+            detail=f"Este anticipo ya lo usó la factura {comprobantes}. Anúlala primero y vuelve a intentar.",
+        )
+    if entrada.get("liquidacion"):
+        raise HTTPException(
+            status_code=400,
+            detail="Este anticipo ya se liquidó (saldo a favor o devolución). Ajusta eso en vez de borrarlo.",
+        )
+
+    anticipos.pop(indice)
+    await collection_client_packages.update_one(
+        {"paquete_id": paquete_id},
+        {
+            "$set": {"anticipos": anticipos},
+            "$push": {"anticipos_eliminados": {
+                **entrada,
+                "motivo": motivo,
+                "eliminado_por": current_user.get("email"),
+                "eliminado_en": datetime.now(),
+            }},
+        },
+    )
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    return {
+        "success": True,
+        "mensaje": f"Anticipo de {entrada.get('monto')} eliminado",
+        "anticipo": estado_anticipo(paquete),
+    }
+
+
+@router.post("/paquetes/{paquete_id}/facturar-cubiertas", response_model=dict)
+async def facturar_sesiones_cubiertas(
+    paquete_id: str,
+    data: MigrarPorSesionRequest = MigrarPorSesionRequest(),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Factura de una vez todas las sesiones ya realizadas que el anticipo del
+    cliente alcanza a cubrir, de la más vieja a la más nueva.
+
+    Es el paso que faltaba para que la comisión llegue al profesional: la
+    comisión se registra con la factura de cada sesión, y así el admin no
+    tiene que entrar sesión por sesión. Por defecto es VISTA PREVIA.
+    """
+    from app.bills.routes import facturar_cita_o_venta, FacturarRequest
+
+    if current_user.get("rol") not in ["admin_sede", "super_admin", "recepcionista", "call_center"]:
+        raise HTTPException(status_code=403, detail="No autorizado para facturar")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if modo_facturacion(paquete) != MODO_POR_SESION:
+        raise HTTPException(
+            status_code=400,
+            detail="Este paquete se factura completo de una sola vez. Cámbialo a factura por sesión primero.",
+        )
+
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    disponible = estado_anticipo(paquete)["disponible"]
+
+    pendientes, sin_cubrir = [], []
+    for cita, idx in await citas_ligadas_paquete(paquete):
+        if estado_cita(cita) not in ESTADOS_CONSUMEN_SESION:
+            continue
+        if cita.get("estado_factura") == "facturado":
+            continue
+        total = round(float(cita.get("valor_total", 0) or 0), 2)
+        falta = round(total - float(cita.get("abono", 0) or 0), 2)
+        fila = {
+            "cita_id": str(cita["_id"]),
+            "fecha": str(cita.get("fecha") or "")[:10],
+            "numero_sesion": (cita.get("servicios") or [])[idx].get("numero_sesion"),
+            "profesional": cita.get("profesional_nombre"),
+            "valor": total,
+            "del_anticipo": max(falta, 0),
+        }
+        if falta <= disponible:
+            disponible = round(disponible - max(falta, 0), 2)
+            pendientes.append(fila)
+        else:
+            sin_cubrir.append(fila)
+
+    plan = {
+        "success": True,
+        "aplicado": data.aplicar,
+        "paquete_id": paquete_id,
+        "sesiones": pendientes,
+        "sin_cubrir": sin_cubrir,
+        "total_a_facturar": round(sum(s["valor"] for s in pendientes), 2),
+        "anticipo_despues": disponible,
+    }
+    if not data.aplicar or not pendientes:
+        return plan
+
+    facturadas, errores = [], []
+    for fila in pendientes:
+        try:
+            resultado = await facturar_cita_o_venta(
+                fila["cita_id"], tipo="cita", body=FacturarRequest(), current_user=current_user
+            )
+            facturadas.append({**fila, "numero_comprobante": resultado.get("numero_comprobante")})
+        except HTTPException as e:
+            errores.append({**fila, "error": e.detail})
+        except Exception as e:
+            errores.append({**fila, "error": str(e)})
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    plan.update({
+        "facturadas": facturadas,
+        "errores": errores,
+        "anticipo": estado_anticipo(paquete),
+        "mensaje": (
+            f"{len(facturadas)} sesión(es) facturada(s)"
+            + (f", {len(errores)} con problema" if errores else "")
+        ),
+    })
     return plan
 
 

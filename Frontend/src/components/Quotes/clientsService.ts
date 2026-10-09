@@ -439,6 +439,77 @@ export async function liquidarAnticipoPaquete(
   );
 }
 
+export async function corregirAnticipoPaquete(
+  token: string,
+  paqueteId: string,
+  indice: number,
+  cambios: { monto?: number; metodo?: string; fecha?: string; notas?: string; motivo?: string },
+): Promise<{ mensaje: string; anticipo: AnticipoPaquete }> {
+  const res = await fetch(`${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/anticipos/${indice}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(cambios),
+  });
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(error?.detail || 'No se pudo corregir el anticipo');
+  }
+  return res.json();
+}
+
+export async function eliminarAnticipoPaquete(
+  token: string,
+  paqueteId: string,
+  indice: number,
+  motivo: string,
+): Promise<{ mensaje: string; anticipo: AnticipoPaquete }> {
+  const url = `${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/anticipos/${indice}?motivo=${encodeURIComponent(motivo)}`;
+  const res = await fetch(url, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(error?.detail || 'No se pudo eliminar el anticipo');
+  }
+  return res.json();
+}
+
+export interface SesionCubierta {
+  cita_id: string;
+  fecha: string;
+  numero_sesion?: number | null;
+  profesional?: string | null;
+  valor: number;
+  del_anticipo: number;
+  numero_comprobante?: string;
+  error?: string;
+}
+
+export interface FacturarCubiertas {
+  aplicado: boolean;
+  paquete_id: string;
+  sesiones: SesionCubierta[];
+  sin_cubrir: SesionCubierta[];
+  total_a_facturar: number;
+  anticipo_despues: number;
+  facturadas?: SesionCubierta[];
+  errores?: SesionCubierta[];
+  anticipo?: AnticipoPaquete;
+  mensaje?: string;
+}
+
+/** Vista previa (aplicar=false) o facturación de todas las sesiones que cubre el anticipo. */
+export async function facturarSesionesCubiertas(
+  token: string,
+  paqueteId: string,
+  aplicar: boolean,
+): Promise<FacturarCubiertas> {
+  return _postJson(
+    `${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/facturar-cubiertas`,
+    token,
+    { aplicar },
+    'No se pudieron facturar las sesiones',
+  );
+}
+
 export interface MigracionPorSesion {
   aplicado: boolean;
   paquete_id: string;
@@ -483,8 +554,14 @@ export interface PagoConsolidadoPaquete {
   tipo: string;
   registrado_por?: string;
   notas?: string | null;
-  // "cita": guardado en una sesión (visible en caja). "paquete": solo en el paquete.
-  origen: "cita" | "paquete";
+  // "cita": guardado en una sesión. "anticipo": en la bolsa del paquete.
+  // "paquete": pago viejo que quedó solo en el paquete.
+  origen: "cita" | "paquete" | "anticipo";
+  // Solo para origen "anticipo": cuánto se llevaron ya las facturas de las sesiones
+  consumido?: number;
+  disponible?: number;
+  facturas?: { numero_comprobante?: string; monto: number; cita_id?: string }[];
+  liquidacion?: { tipo: "saldo_a_favor" | "devolucion"; monto: number; motivo?: string | null } | null;
   indice: number;
   en_caja: boolean;
   cita_id?: string;

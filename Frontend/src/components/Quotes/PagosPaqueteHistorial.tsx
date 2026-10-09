@@ -13,6 +13,8 @@ import { formatDateDMY } from "../../lib/dateFormat";
 import { PAYMENT_METHOD_OPTIONS } from "../../lib/payment-methods";
 import { formatMontoInput, parseMontoInput } from "../../lib/money-input";
 import {
+  corregirAnticipoPaquete,
+  eliminarAnticipoPaquete,
   corregirPagoPaquete,
   descartarPagoPaquete,
   getPaquetePorId,
@@ -93,6 +95,9 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
       if (p.origen === "cita" && p.cita_id) {
         await onCorregirPagoCita(p.cita_id, p.indice, cambios);
         await recargar();
+      } else if (p.origen === "anticipo") {
+        await corregirAnticipoPaquete(token, paquete.paquete_id, p.indice, cambios);
+        await recargar();
       } else {
         await recargar(await corregirPagoPaquete(token, paquete.paquete_id, p.indice, cambios));
       }
@@ -119,6 +124,25 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
       toast.success("Pago pasado a esta sesión");
     } catch (error: any) {
       toast.error(error?.message || "No se pudo pasar el pago");
+    } finally {
+      setTrabajando(false);
+    }
+  };
+
+  const eliminarAnticipo = async (p: PagoConsolidadoPaquete) => {
+    if (motivo.trim().length < 3) {
+      toast.error("Escribe el motivo (ej. 'el pago era de otro servicio')");
+      return;
+    }
+    setTrabajando(true);
+    try {
+      await eliminarAnticipoPaquete(token, paquete.paquete_id, p.indice, motivo.trim());
+      await recargar();
+      toast.success("Anticipo eliminado");
+      setEliminando(null);
+      setMotivo("");
+    } catch (error: any) {
+      toast.error(error?.message || "No se pudo eliminar el anticipo");
     } finally {
       setTrabajando(false);
     }
@@ -186,14 +210,18 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
         const clave = claveDe(p);
         const esEstaCita = p.cita_id === citaActualId;
         const metodoLower = String(p.metodo || "").toLowerCase();
+        const anticipoLibre = p.origen === "anticipo" && !(p.consumido ?? 0) && !p.liquidacion;
         const corregible =
-          metodoLower !== "giftcard" && metodoLower !== "saldo_a_favor" && !(p.origen === "cita" && p.cita_facturada);
+          metodoLower !== "giftcard" &&
+          metodoLower !== "saldo_a_favor" &&
+          !(p.origen === "cita" && p.cita_facturada) &&
+          !(p.origen === "anticipo" && p.liquidacion);
         return (
           <div
             key={clave}
             className="rounded-xl p-3"
             style={{
-              background: p.origen === "paquete" ? "#FFFBEB" : "#F8FAFC",
+              background: p.origen === "paquete" ? "#FFFBEB" : p.origen === "anticipo" ? "#F0FDF4" : "#F8FAFC",
               border: esEstaCita ? "1px solid #CBD5E1" : "1px solid transparent",
             }}
           >
@@ -219,6 +247,17 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
                     {esEstaCita ? " (esta cita)" : ""}
                     {onAbrirCita && !esEstaCita && <ChevronRight className="w-3 h-3" />}
                   </button>
+                ) : p.origen === "anticipo" ? (
+                  <p className="mt-0.5 text-[10px] font-medium" style={{ color: "#047857" }}>
+                    Anticipo del paquete
+                    {(p.consumido ?? 0) > 0 && ` · ${formatMonto(p.consumido ?? 0)} ya facturado`}
+                    {(p.disponible ?? 0) > 0 && ` · ${formatMonto(p.disponible ?? 0)} disponible`}
+                    {p.liquidacion &&
+                      ` · ${p.liquidacion.tipo === "saldo_a_favor" ? "pasado a saldo a favor" : "devuelto"}`}
+                    {!p.en_caja && (
+                      <span style={{ color: "#B45309" }}> · no aparece en caja (pago viejo del paquete)</span>
+                    )}
+                  </p>
                 ) : (
                   <p className="mt-0.5 text-[10px] font-semibold" style={{ color: "#B45309" }}>
                     Solo en el paquete · no aparece en caja
@@ -245,6 +284,25 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
                 >
                   Corregir
                 </button>
+              )}
+              {anticipoLibre && puedeGestionar && eliminando !== clave && (
+                <button
+                  type="button"
+                  className="underline"
+                  style={{ color: "#EF4444" }}
+                  disabled={trabajando}
+                  onClick={() => {
+                    setEliminando(clave);
+                    setMotivo("");
+                  }}
+                >
+                  Eliminar
+                </button>
+              )}
+              {p.origen === "anticipo" && (p.consumido ?? 0) > 0 && (
+                <span style={{ color: "#94A3B8" }}>
+                  (ya facturado{p.facturas?.length ? ` en ${p.facturas.map((f) => f.numero_comprobante).join(", ")}` : ""})
+                </span>
               )}
               {p.origen === "cita" && corregible && onEliminarPagoCita && eliminando !== clave && (
                 <button
@@ -333,7 +391,7 @@ const PagosPaqueteHistorial: React.FC<Props> = ({
                 <button
                   type="button"
                   disabled={trabajando}
-                  onClick={() => eliminarPagoDeSesion(p)}
+                  onClick={() => (p.origen === "anticipo" ? eliminarAnticipo(p) : eliminarPagoDeSesion(p))}
                   className="text-xs font-semibold px-2 py-1 rounded-md text-white disabled:opacity-50"
                   style={{ background: "#EF4444" }}
                 >

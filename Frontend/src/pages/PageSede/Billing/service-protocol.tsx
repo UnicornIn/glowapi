@@ -29,6 +29,8 @@ import {
   getSesionesPaquete,
   registrarAnticipoPaquete,
   liquidarAnticipoPaquete,
+  facturarSesionesCubiertas,
+  type FacturarCubiertas,
   type AnticipoPaquete,
   ESTADO_COMISION_LABEL,
   type SesionPaquete,
@@ -293,6 +295,10 @@ export function ServiceProtocol({
   // factura sola contra ella.
   const [anticipo, setAnticipo] = useState<AnticipoPaquete | null>(null);
   const [liquidando, setLiquidando] = useState(false);
+  // Sesiones realizadas que el anticipo alcanza a cubrir (para el botón de
+  // facturarlas todas de una).
+  const [cubiertas, setCubiertas] = useState<FacturarCubiertas | null>(null);
+  const [facturandoCubiertas, setFacturandoCubiertas] = useState(false);
   const puedeGestionarPaquete = ["super_admin", "admin_sede"].includes(
     String((user as any)?.rol || user?.role || ""),
   );
@@ -312,6 +318,11 @@ export function ServiceProtocol({
       setPaquete(datosPaquete);
       setSesionesPaquete(sesiones?.sesiones || []);
       setAnticipo(sesiones?.paquete?.anticipo ?? null);
+      setCubiertas(
+        sesiones?.paquete?.anticipo
+          ? await facturarSesionesCubiertas(token, paqueteId, false).catch(() => null)
+          : null,
+      );
       setSesionPaquete(sesiones?.sesiones.find((s) => s.cita_id === selectedAppointment?._id) || null);
     } finally {
       setCargandoPaquete(false);
@@ -326,6 +337,7 @@ export function ServiceProtocol({
   const esCompraPaquete = !!paquete && paquete.cita_origen_id === selectedAppointment?._id;
   const esSesionPaquete = !!paquete && !esCompraPaquete;
   const paqueteFacturado = !!paquete?.facturacion;
+
 
   // Acumulado del paquete por profesional: qué sesiones ha hecho cada uno,
   // cuánto valen y cuánta comisión lleva (las agendadas van aparte, estimadas).
@@ -367,6 +379,17 @@ export function ServiceProtocol({
   }, [sesionesPaquete]);
 
   const totalGeneral = servicioTotal + productosTotal;
+
+  // Modo "por sesión": para facturar esta cita basta con que el anticipo (más
+  // lo pagado en ella) cubra su valor. Que el paquete completo siga teniendo
+  // saldo no bloquea nada: el cliente paga a medida que avanza.
+  const faltaParaEstaSesion = anticipo
+    ? Math.max(totalGeneral - ((selectedAppointment?.abono || 0) + anticipo.disponible), 0)
+    : 0;
+  const sesionCubierta = !!anticipo && totalGeneral > 0 && faltaParaEstaSesion <= 0;
+  const otrasCubiertas = (cubiertas?.sesiones || []).filter(
+    (s) => s.cita_id !== selectedAppointment?._id,
+  );
   const totalPagado = anticipo ? anticipo.total : paquete ? paquete.abono : (selectedAppointment?.abono ?? 0);
   const saldoPendiente = paquete
     ? paquete.saldo_pendiente
@@ -459,6 +482,39 @@ export function ServiceProtocol({
       });
     } catch (error) {
       toast.error("Error al eliminar producto");
+    }
+  };
+
+  const handleFacturarCubiertas = async () => {
+    const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+    if (!token || !paquete || !cubiertas?.sesiones.length) return;
+    const detalle = cubiertas.sesiones
+      .map((s) => `· ${formatDateDMY(s.fecha)} sesión ${s.numero_sesion ?? "–"} — $${formatMoney(s.valor)}`)
+      .join("\n");
+    const ok = await confirmAction({
+      title: `Facturar ${cubiertas.sesiones.length} sesión(es)`,
+      message:
+        `Se emite una factura por cada sesión ya realizada que cubre el anticipo, y cada una genera su comisión:\n\n${detalle}\n\n` +
+        `Total $${formatMoney(cubiertas.total_a_facturar)}. El anticipo quedaría en $${formatMoney(cubiertas.anticipo_despues)}.`,
+      confirmLabel: "Sí, facturar",
+      variant: "primary",
+    });
+    if (!ok) return;
+    setFacturandoCubiertas(true);
+    try {
+      const res = await facturarSesionesCubiertas(token, paquete.paquete_id, true);
+      toast.success(res.mensaje || "Sesiones facturadas");
+      (res.errores || []).forEach((e) =>
+        toast.warning(`${formatDateDMY(e.fecha)}: ${e.error}`, { duration: 10000 }),
+      );
+      await recargarPaquete();
+      if (selectedAppointment) {
+        onAppointmentUpdated?.({ ...selectedAppointment, estado_factura: "facturado" });
+      }
+    } catch (error: any) {
+      toast.error(error?.message || "No se pudieron facturar las sesiones");
+    } finally {
+      setFacturandoCubiertas(false);
     }
   };
 
@@ -1225,6 +1281,41 @@ export function ServiceProtocol({
             >
               Cubierta por la factura del paquete ({paquete?.facturacion?.numero_comprobante})
             </button>
+          ) : anticipo ? (
+            <div className="space-y-2">
+              {sesionCubierta ? (
+                <button
+                  onClick={handleFacturarCita}
+                  disabled={isFacturando || facturandoCubiertas}
+                  className="w-full py-3.5 text-center text-sm font-bold text-white bg-gray-900 hover:bg-gray-800 disabled:opacity-50 rounded-lg"
+                >
+                  {isFacturando ? "Facturando..." : `Facturar esta sesión · $${formatMoney(totalGeneral)}`}
+                </button>
+              ) : (
+                <button
+                  className="w-full py-3.5 text-center text-sm font-bold text-white bg-gray-900 opacity-30 cursor-default rounded-lg"
+                  disabled
+                >
+                  Falta ${formatMoney(faltaParaEstaSesion)} de anticipo para esta sesión
+                </button>
+              )}
+              {otrasCubiertas.length > 0 && (
+                <button
+                  onClick={handleFacturarCubiertas}
+                  disabled={facturandoCubiertas || isFacturando}
+                  className="w-full py-2.5 text-center text-sm font-semibold rounded-lg disabled:opacity-50"
+                  style={{ border: "1px solid #047857", color: "#047857", background: "#F0FDF4" }}
+                >
+                  {facturandoCubiertas
+                    ? "Facturando..."
+                    : `Facturar las ${cubiertas!.sesiones.length} sesiones que cubre el anticipo · $${formatMoney(cubiertas!.total_a_facturar)}`}
+                </button>
+              )}
+              <p className="text-[11px] text-center text-gray-400">
+                Anticipo disponible ${formatMoney(anticipo.disponible)}
+                {saldoPendiente > 0 && ` · al paquete le falta por abonar $${formatMoney(saldoPendiente)}`}
+              </p>
+            </div>
           ) : saldoPendiente > 0 && !isPagado ? (
             <button
               className="w-full py-3.5 text-center text-sm font-bold text-white bg-gray-900 opacity-30 cursor-default rounded-lg"
