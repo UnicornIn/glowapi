@@ -81,6 +81,19 @@ def pendiente_en_caja(entrada: dict) -> float:
     return max(round(_monto(entrada.get("monto")) - _consumido(entrada), 2), 0)
 
 
+def _ultima_liquidacion(entradas: list) -> Optional[dict]:
+    liquidaciones = [e["liquidacion"] for e in entradas if e.get("liquidacion")]
+    if not liquidaciones:
+        return None
+    ultima = max(liquidaciones, key=lambda l: str(l.get("fecha") or ""))
+    return {
+        "tipo": ultima.get("tipo"),
+        "fecha": ultima.get("fecha").isoformat() if isinstance(ultima.get("fecha"), datetime) else ultima.get("fecha"),
+        "usuario": ultima.get("usuario"),
+        "motivo": ultima.get("motivo"),
+    }
+
+
 def estado_anticipo(paquete: dict) -> dict:
     """Resumen de la bolsa: total abonado, consumido en facturas, liquidado y disponible."""
     entradas = paquete.get("anticipos") or []
@@ -93,6 +106,8 @@ def estado_anticipo(paquete: dict) -> dict:
         "liquidado": liquidado,
         "disponible": max(round(total - consumido - liquidado, 2), 0),
         "entradas": len(entradas),
+        # Para poder explicar en pantalla por qué el anticipo no alcanza.
+        "liquidacion": _ultima_liquidacion(entradas),
     }
 
 
@@ -306,6 +321,31 @@ async def mover_pagos_cita_a_anticipo(cita: dict, paquete_id: str) -> float:
         }},
     )
     return round(sum(e["monto"] for e in entradas), 2)
+
+
+async def deshacer_liquidacion(paquete: dict) -> dict:
+    """
+    Devuelve a la bolsa un anticipo que se había liquidado (se marcó como
+    devuelto al cliente o pasado a saldo a favor) sin que eso ocurriera de
+    verdad. Quien llama se encarga de revertir el egreso o el crédito.
+    """
+    entradas = paquete.get("anticipos") or []
+    revertido, por_tipo = 0.0, {}
+    for entrada in entradas:
+        liquidacion = entrada.get("liquidacion")
+        if not liquidacion:
+            continue
+        monto = _monto(liquidacion.get("monto"))
+        revertido = round(revertido + monto, 2)
+        por_tipo[liquidacion.get("tipo")] = round(por_tipo.get(liquidacion.get("tipo"), 0) + monto, 2)
+        entrada.pop("liquidacion", None)
+        entrada["liquidaciones_revertidas"] = (entrada.get("liquidaciones_revertidas") or []) + [liquidacion]
+
+    if revertido > 0:
+        await collection_client_packages.update_one(
+            {"paquete_id": paquete["paquete_id"]}, {"$set": {"anticipos": entradas}}
+        )
+    return {"revertido": revertido, "por_tipo": por_tipo}
 
 
 def pagos_anticipo_para_panel(paquete: dict) -> list:

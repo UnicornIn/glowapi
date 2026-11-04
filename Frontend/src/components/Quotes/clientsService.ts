@@ -399,6 +399,27 @@ export interface AnticipoPaquete {
   /** Lo que queda para cubrir próximas sesiones */
   disponible: number;
   entradas: number;
+  /** Si el anticipo se cerró (devuelto o pasado a saldo a favor), por qué no alcanza */
+  liquidacion?: {
+    tipo: "saldo_a_favor" | "devolucion";
+    fecha?: string;
+    usuario?: string;
+    motivo?: string | null;
+  } | null;
+}
+
+export async function deshacerLiquidacionAnticipo(
+  token: string,
+  paqueteId: string,
+  motivo: string,
+): Promise<{ mensaje: string; revertido: number; avisos: string[]; anticipo: AnticipoPaquete }> {
+  const url = `${API_BASE_URL}scheduling/quotes/paquetes/${paqueteId}/anticipo/deshacer-liquidacion?motivo=${encodeURIComponent(motivo)}`;
+  const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(error?.detail || 'No se pudo deshacer la liquidación del anticipo');
+  }
+  return res.json();
 }
 
 export interface AnticipoEntrada {

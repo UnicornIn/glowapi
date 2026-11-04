@@ -388,21 +388,37 @@ async def sincronizar_paquete(paquete_id: Optional[str], dry_run: bool = False) 
         "historial_uso": nuevo_historial + ajustes,
     }
     if por_sesion:
-        # La bolsa manda: el abonado del paquete es lo que entró como
-        # anticipo, no la suma de pagos de las sesiones (cada sesión se
-        # cubre desde la bolsa al facturarse).
         anticipo = estado_anticipo(paquete)
+        # Plata del paquete que NO está en la bolsa: la que se cobró dentro
+        # de una sesión que ya se facturó por su cuenta. Ya hizo su trabajo
+        # (pagó esa factura), pero es dinero del paquete y tiene que contar
+        # en lo abonado — si no, el paquete aparece como si le faltara.
+        pagado_en_sesiones = round(sum(
+            float(p.get("monto", 0) or 0)
+            for cita, _ in ligadas
+            if cita.get("estado_factura") == "facturado"
+            for p in cita.get("historial_pagos") or []
+        ), 2)
         set_paquete.update({
             "anticipo_total": anticipo["total"],
             "anticipo_consumido": anticipo["consumido"],
             "anticipo_liquidado": anticipo["liquidado"],
             "anticipo_disponible": anticipo["disponible"],
+            "pagado_en_sesiones": pagado_en_sesiones,
         })
     if not por_sesion and not paquete.get("pagos_migrados"):
         set_paquete.update(_migrar_pagos_legacy(paquete, ligadas))
     paquete_para_pagos = {**paquete, **set_paquete}
+    # Abonado = lo que el cliente tiene puesto HOY en el paquete: lo que
+    # queda en la bolsa (sin contar lo devuelto o pasado a saldo a favor)
+    # más lo que ya se cobró dentro de sesiones facturadas.
     set_paquete["abono"] = (
-        set_paquete["anticipo_total"] if por_sesion
+        round(
+            set_paquete["anticipo_total"]
+            - set_paquete["anticipo_liquidado"]
+            + set_paquete["pagado_en_sesiones"],
+            2,
+        ) if por_sesion
         else (await pagos_consolidados_paquete(paquete_para_pagos, ligadas))["abono"]
     )
 
