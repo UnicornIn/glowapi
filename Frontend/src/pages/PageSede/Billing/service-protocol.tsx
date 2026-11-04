@@ -29,6 +29,8 @@ import {
   getSesionesPaquete,
   registrarAnticipoPaquete,
   liquidarAnticipoPaquete,
+  deshacerLiquidacionAnticipo,
+  eliminarAnticipoPaquete,
   facturarSesionesCubiertas,
   type FacturarCubiertas,
   type AnticipoPaquete,
@@ -299,6 +301,11 @@ export function ServiceProtocol({
   // facturarlas todas de una).
   const [cubiertas, setCubiertas] = useState<FacturarCubiertas | null>(null);
   const [facturandoCubiertas, setFacturandoCubiertas] = useState(false);
+  // Borrar un anticipo mal registrado (ej. el mismo pago anotado dos veces)
+  // sin salir de Facturación.
+  const [borrandoAnticipo, setBorrandoAnticipo] = useState<number | null>(null);
+  const [motivoAnticipo, setMotivoAnticipo] = useState("");
+  const [guardandoAnticipo, setGuardandoAnticipo] = useState(false);
   const puedeGestionarPaquete = ["super_admin", "admin_sede"].includes(
     String((user as any)?.rol || user?.role || ""),
   );
@@ -390,7 +397,38 @@ export function ServiceProtocol({
   const otrasCubiertas = (cubiertas?.sesiones || []).filter(
     (s) => s.cita_id !== selectedAppointment?._id,
   );
-  const totalPagado = anticipo ? anticipo.total : paquete ? paquete.abono : (selectedAppointment?.abono ?? 0);
+  // Todo lo que el cliente ha pagado del paquete: la bolsa de anticipo + lo
+  // que haya quedado en sesiones ya facturadas. Antes "Cobrado" solo miraba
+  // la bolsa y no cuadraba con la lista de pagos de abajo — así un pago
+  // registrado dos veces pasaba desapercibido.
+  const pagosDelPaquete = paquete?.pagos ?? [];
+
+  const valorDelPaquete = paquete ? (paquete.valor_paquete || paquete.valor_total || 0) : 0;
+  // Plata del paquete que no está en la bolsa: se cobró dentro de una sesión
+  // que ya se facturó sola. Ya pagó esa factura, pero es del paquete.
+  const pagadoEnSesiones =
+    Math.round(
+      pagosDelPaquete
+        .filter((p) => p.origen === "cita" && p.cita_facturada)
+        .reduce((t, p) => t + (Number(p.monto) || 0), 0) * 100,
+    ) / 100;
+  const aplicadoAFacturas = Math.round(((anticipo?.consumido ?? 0) + pagadoEnSesiones) * 100) / 100;
+  // Lo que el cliente tiene puesto HOY en el paquete: lo devuelto (o pasado a
+  // saldo a favor) ya no es suyo acá, así que no suma.
+  const enElAnticipo = anticipo ? Math.round((anticipo.total - anticipo.liquidado) * 100) / 100 : 0;
+  const pagadoVigente = Math.round((enElAnticipo + pagadoEnSesiones) * 100) / 100;
+  // Pagos que nunca pasaron por caja: los candidatos a estar repetidos (el
+  // admin los registró en el paquete viejo y otra vez en la sesión).
+  const excedentePaquete = anticipo ? Math.round((pagadoVigente - valorDelPaquete) * 100) / 100 : 0;
+  const pagosSinCaja = pagosDelPaquete.filter(
+    (p) => p.origen === "anticipo" && p.en_caja === false && !p.liquidacion,
+  );
+
+  const totalPagado = anticipo
+    ? pagadoVigente
+    : paquete
+      ? paquete.abono
+      : (selectedAppointment?.abono ?? 0);
   const saldoPendiente = paquete
     ? paquete.saldo_pendiente
     : (selectedAppointment?.saldo_pendiente ?? (totalGeneral - totalPagado));
@@ -515,6 +553,53 @@ export function ServiceProtocol({
       toast.error(error?.message || "No se pudieron facturar las sesiones");
     } finally {
       setFacturandoCubiertas(false);
+    }
+  };
+
+  const handleDeshacerLiquidacion = async () => {
+    const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+    if (!token || !paquete || !anticipo?.liquidacion) return;
+    const esDevolucion = anticipo.liquidacion.tipo === "devolucion";
+    const ok = await confirmAction({
+      title: esDevolucion ? "Deshacer la devolución" : "Deshacer el saldo a favor",
+      message: esDevolucion
+        ? `Los $${formatMoney(anticipo.liquidado)} vuelven a quedar como anticipo del paquete y se anula el egreso que había quedado en caja. Hazlo solo si el dinero NO se le entregó al cliente.`
+        : `Los $${formatMoney(anticipo.liquidado)} vuelven a quedar como anticipo del paquete y se descuentan del saldo a favor del cliente.`,
+      confirmLabel: "Sí, deshacer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setLiquidando(true);
+    try {
+      const res = await deshacerLiquidacionAnticipo(token, paquete.paquete_id, "corrección del administrador");
+      toast.success(res.mensaje);
+      (res.avisos || []).forEach((a) => toast.warning(a, { duration: 10000 }));
+      await recargarPaquete();
+    } catch (error: any) {
+      toast.error(error?.message || "No se pudo deshacer");
+    } finally {
+      setLiquidando(false);
+    }
+  };
+
+  const handleEliminarAnticipo = async (indice: number) => {
+    const token = user?.access_token || localStorage.getItem("access_token") || sessionStorage.getItem("access_token");
+    if (!token || !paquete) return;
+    if (motivoAnticipo.trim().length < 3) {
+      toast.error("Escribe el motivo (ej. 'el mismo pago quedó registrado dos veces')");
+      return;
+    }
+    setGuardandoAnticipo(true);
+    try {
+      const res = await eliminarAnticipoPaquete(token, paquete.paquete_id, indice, motivoAnticipo.trim());
+      toast.success(res.mensaje);
+      setBorrandoAnticipo(null);
+      setMotivoAnticipo("");
+      await recargarPaquete();
+    } catch (error: any) {
+      toast.error(error?.message || "No se pudo eliminar el pago");
+    } finally {
+      setGuardandoAnticipo(false);
     }
   };
 
@@ -999,20 +1084,34 @@ export function ServiceProtocol({
                       ...(anticipo
                         ? [
                             [
-                              "Anticipo abonado",
-                              `$${formatMoney(anticipo.total)} de $${formatMoney(paquete.valor_paquete || paquete.valor_total)}`,
-                              "Todo lo que el cliente ha pagado del paquete. Entra a caja el día que lo paga.",
+                              "Pagado del paquete",
+                              `$${formatMoney(pagadoVigente)} de $${formatMoney(valorDelPaquete)}`,
+                              "Lo que el cliente tiene puesto hoy: lo que queda en el anticipo más lo cobrado dentro de sesiones ya facturadas. No cuenta lo devuelto.",
                             ],
                             [
-                              "Usado en facturas",
-                              `$${formatMoney(anticipo.consumido)}`,
-                              "La parte del anticipo que ya se llevaron las facturas de las sesiones prestadas.",
+                              "En el anticipo",
+                              `$${formatMoney(enElAnticipo)}`,
+                              "La bolsa del paquete: de acá sale el pago de cada sesión al facturarla.",
+                            ],
+                            ...(pagadoEnSesiones > 0
+                              ? ([[
+                                  "Cobrado en sesiones ya facturadas",
+                                  `$${formatMoney(pagadoEnSesiones)}`,
+                                  "Pagos que quedaron dentro de una sesión que se facturó por su cuenta. Esa plata ya pagó esa factura, por eso no está en el anticipo.",
+                                ]] as [string, string, string][])
+                              : []),
+                            [
+                              "Aplicado a facturas",
+                              `$${formatMoney(aplicadoAFacturas)}`,
+                              "Todo lo que ya entró en una factura: lo que se tomó del anticipo más lo cobrado dentro de sesiones ya facturadas.",
                             ],
                             ...(anticipo.liquidado > 0
                               ? ([[
-                                  "Liquidado",
+                                  anticipo.liquidacion?.tipo === "saldo_a_favor"
+                                    ? "Pasado a saldo a favor"
+                                    : "Devuelto al cliente",
                                   `$${formatMoney(anticipo.liquidado)}`,
-                                  "Anticipo que se cerró: pasó a saldo a favor del cliente o se le devolvió.",
+                                  "Plata que salió del paquete: se le devolvió al cliente o quedó como crédito suyo. Por eso ya no cubre sesiones.",
                                 ]] as [string, string, string][])
                               : []),
                             [
@@ -1057,6 +1156,47 @@ export function ServiceProtocol({
                       moneda={paquete.moneda}
                       onMigrado={() => void recargarPaquete()}
                     />
+                  )}
+
+                  {excedentePaquete > 0 && (
+                    <div className="rounded-md px-3 py-2 text-xs" style={{ background: "#FFFBEB", color: "#92400E" }}>
+                      <p className="font-semibold">
+                        Hay ${formatMoney(excedentePaquete)} de más: hay ${formatMoney(pagadoVigente)} pagados para
+                        un paquete de ${formatMoney(valorDelPaquete)}.
+                      </p>
+                      <p className="mt-0.5">
+                        {pagosSinCaja.length > 0
+                          ? "Casi siempre es el mismo pago anotado dos veces: una en el paquete y otra en la sesión. El que sobra es el que nunca pasó por caja; bórralo abajo, en la lista de pagos."
+                          : "Revisa el historial: puede ser un pago repetido o un abono de más del cliente."}
+                      </p>
+                    </div>
+                  )}
+
+                  {anticipo && anticipo.liquidacion && anticipo.liquidado > 0 && (
+                    <div className="rounded-md px-3 py-2 text-xs" style={{ background: "#FEF2F2", color: "#991B1B" }}>
+                      <p className="font-semibold">
+                        El anticipo de este paquete se{" "}
+                        {anticipo.liquidacion.tipo === "devolucion" ? "devolvió al cliente" : "pasó a saldo a favor"} el{" "}
+                        {formatDateDMY(anticipo.liquidacion.fecha || "", "")} (${formatMoney(anticipo.liquidado)}).
+                      </p>
+                      <p className="mt-0.5">
+                        Por eso ya no cubre sesiones: la plata figura como entregada. Si fue por error, deshazlo y
+                        vuelve a quedar disponible.
+                      </p>
+                      {puedeGestionarPaquete && (
+                        <button
+                          type="button"
+                          disabled={liquidando}
+                          onClick={handleDeshacerLiquidacion}
+                          className="mt-2 rounded-md px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                          style={{ background: "#991B1B" }}
+                        >
+                          {anticipo.liquidacion.tipo === "devolucion"
+                            ? "Deshacer la devolución"
+                            : "Deshacer el saldo a favor"}
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   {anticipo && anticipo.disponible > 0 && puedeGestionarPaquete && (
@@ -1144,6 +1284,13 @@ export function ServiceProtocol({
                 <span>{paquete ? "Pagos del paquete" : "Pagos"}</span>
                 <span className="text-xs font-medium text-gray-500">
                   Cobrado: ${formatMoney(totalPagado)} / ${formatMoney(paquete ? paquete.valor_total : totalGeneral)}
+                  {anticipo && anticipo.liquidado > 0 && (
+                    <span className="text-amber-700">
+                      {" "}
+                      · ${formatMoney(anticipo.liquidado)}{" "}
+                      {anticipo.liquidacion?.tipo === "saldo_a_favor" ? "a saldo a favor" : "devueltos"}
+                    </span>
+                  )}
                 </span>
               </div>
 
@@ -1160,8 +1307,16 @@ export function ServiceProtocol({
                           <p className="font-medium text-gray-800">
                             {formatDateDMY(pago.fecha, "")} · {getPaymentMethodLabel(pago.metodo)}
                           </p>
-                          <p className={`text-[10px] ${pago.origen === "paquete" ? "text-amber-700 font-semibold" : "text-gray-400"}`}>
-                            {pago.origen === "paquete"
+                          <p
+                            className={`text-[10px] ${
+                              pago.origen === "paquete" || pago.en_caja === false
+                                ? "text-amber-700 font-semibold"
+                                : "text-gray-400"
+                            }`}
+                          >
+                            {pago.origen === "anticipo"
+                              ? `Anticipo del paquete${pago.en_caja === false ? " · no aparece en caja (posible duplicado)" : ""}${(pago.consumido ?? 0) > 0 ? ` · ${formatMoney(pago.consumido ?? 0)} ya facturado` : ""}${pago.liquidacion ? (pago.liquidacion.tipo === "devolucion" ? " · devuelto" : " · pasado a saldo a favor") : ""}`
+                              : pago.origen === "paquete"
                               ? "Solo en el paquete · resolver desde la agenda"
                               : pago.es_origen
                                 ? "Compra del paquete"
@@ -1171,6 +1326,52 @@ export function ServiceProtocol({
                         <span className="font-semibold text-gray-900">${formatMoney(pago.monto)}</span>
                       </div>
                     ))}
+
+                    {/* Corregir un anticipo mal registrado sin salir de acá */}
+                    {puedeGestionarPaquete &&
+                      paquete.pagos!
+                        .filter((pago) => pago.origen === "anticipo" && !(pago.consumido ?? 0) && !pago.liquidacion)
+                        .map((pago) => (
+                          <div key={`acc-${pago.indice}`} className="pb-2 text-[11px]">
+                            {borrandoAnticipo === pago.indice ? (
+                              <div className="flex flex-wrap items-center gap-2">
+                                <input
+                                  value={motivoAnticipo}
+                                  onChange={(e) => setMotivoAnticipo(e.target.value)}
+                                  placeholder="Motivo (ej. el mismo pago quedó registrado dos veces)"
+                                  className="flex-1 min-w-[12rem] rounded-md border border-gray-200 px-2 py-1 text-[11px]"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={guardandoAnticipo}
+                                  onClick={() => handleEliminarAnticipo(pago.indice)}
+                                  className="rounded-md bg-red-600 px-2 py-1 font-semibold text-white disabled:opacity-50"
+                                >
+                                  {guardandoAnticipo ? "..." : "Eliminar pago"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setBorrandoAnticipo(null)}
+                                  className="px-2 py-1 text-gray-500"
+                                >
+                                  Cancelar
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setBorrandoAnticipo(pago.indice);
+                                  setMotivoAnticipo("");
+                                }}
+                                className="underline text-red-600"
+                              >
+                                Eliminar el pago del {formatDateDMY(pago.fecha, "")} (${formatMoney(pago.monto)})
+                                {pago.en_caja === false ? " · el que no pasó por caja" : ""}
+                              </button>
+                            )}
+                          </div>
+                        ))}
                   </div>
                 )}
                 {!paquete && (selectedAppointment?.historial_pagos?.length ?? 0) > 0 && (
@@ -1296,7 +1497,9 @@ export function ServiceProtocol({
                   className="w-full py-3.5 text-center text-sm font-bold text-white bg-gray-900 opacity-30 cursor-default rounded-lg"
                   disabled
                 >
-                  Falta ${formatMoney(faltaParaEstaSesion)} de anticipo para esta sesión
+                  {anticipo.liquidacion && anticipo.liquidado > 0
+                    ? `Anticipo ${anticipo.liquidacion.tipo === "devolucion" ? "devuelto" : "pasado a saldo a favor"}: no cubre esta sesión`
+                    : `Falta $${formatMoney(faltaParaEstaSesion)} de anticipo para esta sesión`}
                 </button>
               )}
               {otrasCubiertas.length > 0 && (

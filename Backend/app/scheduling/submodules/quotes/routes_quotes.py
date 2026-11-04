@@ -38,6 +38,7 @@ from app.scheduling.submodules.quotes.anticipos_paquete import (
     mover_pagos_cita_a_anticipo,
     registrar_anticipo,
     liquidar_anticipo,
+    deshacer_liquidacion,
     pagos_anticipo_para_panel,
 )
 from app.scheduling.models import Cita, ProductoItem, PagoRequest, ServicioEnCita, ServicioEnFicha
@@ -5048,6 +5049,80 @@ async def facturar_sesiones_cubiertas(
         ),
     })
     return plan
+
+
+
+
+@router.post("/paquetes/{paquete_id}/anticipo/deshacer-liquidacion", response_model=dict)
+async def deshacer_liquidacion_anticipo(
+    paquete_id: str,
+    motivo: str = Query(..., min_length=3, description="Por qué se deshace (queda auditado)"),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Deshace una devolución o un paso a saldo a favor que no debió hacerse:
+    el anticipo vuelve a estar disponible para cubrir sesiones.
+
+    - Devolución: se anula el egreso que había quedado en caja.
+    - Saldo a favor: se descuenta del crédito del cliente (si ya lo gastó,
+      se avisa y se deja el crédito como está).
+    """
+    if current_user.get("rol") not in ROLES_GESTION_PAQUETES:
+        raise HTTPException(status_code=403, detail="Solo un administrador puede deshacer la liquidación")
+
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    if not paquete:
+        raise HTTPException(status_code=404, detail="Paquete de sesiones no encontrado")
+    if current_user.get("rol") == "admin_sede" and paquete.get("sede_id") != current_user.get("sede_id"):
+        raise HTTPException(status_code=403, detail="Solo puedes gestionar paquetes de tu propia sede")
+
+    estado_previo = estado_anticipo(paquete)
+    if estado_previo["liquidado"] <= 0:
+        raise HTTPException(status_code=400, detail="Este paquete no tiene anticipo liquidado")
+
+    resultado = await deshacer_liquidacion(paquete)
+    avisos = []
+
+    devuelto = resultado["por_tipo"].get("devolucion", 0)
+    if devuelto:
+        egresos = await collection_cash_expenses.find({
+            "paquete_id": paquete_id, "origen": "devolucion_anticipo", "eliminado": {"$ne": True},
+        }).to_list(None)
+        for egreso in egresos:
+            await collection_cash_expenses.update_one(
+                {"_id": egreso["_id"]},
+                {"$set": {
+                    "eliminado": True,
+                    "eliminado_por": current_user.get("email"),
+                    "eliminado_en": datetime.now(),
+                    "motivo_eliminacion": f"Devolución deshecha: {motivo}",
+                }},
+            )
+        avisos.append(f"Se anularon {len(egresos)} egreso(s) de caja por {devuelto}")
+
+    credito = resultado["por_tipo"].get("saldo_a_favor", 0)
+    if credito:
+        from app.clients_service.credito import consumir_saldo
+        consumido = await consumir_saldo(
+            paquete.get("cliente_id"), credito,
+            tipo="anticipo_paquete_revertido", registrado_por=current_user.get("email"),
+            notas=f"Se deshizo el paso a saldo a favor del paquete {paquete_id}: {motivo}",
+        )
+        if consumido < credito:
+            avisos.append(
+                f"El cliente ya había usado parte del saldo a favor: se devolvieron {consumido} de {credito}. "
+                "Revisa su saldo."
+            )
+
+    await sincronizar_paquete(paquete_id)
+    paquete = await collection_client_packages.find_one({"paquete_id": paquete_id})
+    return {
+        "success": True,
+        "mensaje": f"El anticipo de {resultado['revertido']} vuelve a estar disponible",
+        "revertido": resultado["revertido"],
+        "avisos": avisos,
+        "anticipo": estado_anticipo(paquete),
+    }
 
 
 @router.post("/{cita_id}/asociar-paquete", response_model=dict)
