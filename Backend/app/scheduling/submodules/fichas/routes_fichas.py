@@ -799,7 +799,12 @@ async def eliminar_ficha(
     ⭐ REGLAS:
     - Estilistas solo pueden eliminar sus propias fichas
     - admin_sede y super_admin pueden eliminar cualquier ficha
-    - No se puede eliminar si la cita asociada está en estado finalizado/completada
+
+    El estado de la cita no bloquea nada: la ficha es documentación clínica y
+    quien la hizo (o el admin) tiene que poder borrar una ficha equivocada
+    aunque la cita ya esté finalizada. La cita no pierde nada al borrarla:
+    solo vuelve a quedar marcada como "ficha pendiente" (ese dato se calcula
+    con las fichas que existen), y no hay dinero ni comisiones involucrados.
     """
 
     # ------------------------------
@@ -823,28 +828,6 @@ async def eliminar_ficha(
     if current_user["rol"] == "estilista":
         if ficha.get("profesional_id") != current_user.get("profesional_id"):
             raise HTTPException(status_code=403, detail="Solo puedes eliminar tus propias fichas")
-
-    # ------------------------------
-    # VERIFICAR CITA ASOCIADA
-    # ------------------------------
-    datos_especificos = ficha.get("datos_especificos", {})
-    cita_id = datos_especificos.get("cita_id") if isinstance(datos_especificos, dict) else None
-
-    if cita_id:
-        try:
-            cita = await collection_citas.find_one({"_id": ObjectId(cita_id)})
-            if cita:
-                estados_bloqueados = {"completada", "finalizada", "finalizado"}
-                estado_cita = str(cita.get("estado", "")).lower()
-                if estado_cita in estados_bloqueados:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"No se puede eliminar la ficha porque la cita asociada está en estado '{cita.get('estado')}'"
-                    )
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # Si el ObjectId es inválido o la cita no existe, continuar normalmente
 
     # ------------------------------
     # ELIMINAR
